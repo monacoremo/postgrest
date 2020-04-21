@@ -11,6 +11,8 @@ let
       (pkgs.gitignoreSource ./.)
       [ ".cabal" ".hs" ".lhs" "LICENSE" ];
 
+  # Revision and hash of the tarball that contains the version of Nixpkgs that
+  # we want to use.
   nixpkgsVersion =
     import nix/nixpkgs-version.nix;
 
@@ -20,6 +22,7 @@ let
       sha256 = nixpkgsVersion.tarballHash;
     };
 
+  # With overlays, we can add and override derivations in our version of `pkgs`.
   overlays =
     [
       (import nix/overlays/gitignore.nix)
@@ -28,8 +31,33 @@ let
   pkgs =
     import pinnedPkgs { inherit overlays; };
 
+  ghcVersion =
+    "ghc883";
+
+  # Use integer-simple instead of GMP. GMP can be faster, but is licensed under
+  # the LGPL and we want to avoid the risk of PostgREST becoming a 'derivative
+  # work' when linking a static executable. See also:
+  # https://github.com/NixOS/nixpkgs/blob/master/doc/languages-frameworks/haskell.section.md#building-ghc-with-integer-simple
+  haskellPackages =
+    pkgs.haskell.packages.integer-simple."${ghcVersion}".override
+      {
+        overrides =
+          self: super:
+            {
+              cryptonite = super.cryptonite.overrideAttrs
+                (
+                  oldAttrs:
+                    {
+                      configureFlags =
+                        oldAttrs.configureFlags ++ [ "-f-integer-gmp" ];
+                    }
+                );
+            };
+      };
+
+  # Base PostgREST derivation, generated from the `postgrest.cabal` file.
   drv =
-    pkgs.haskellPackages.callCabal2nix name src {};
+    haskellPackages.callCabal2nix name src {};
 in
 rec {
   inherit pkgs pinnedPkgs;
@@ -37,13 +65,13 @@ rec {
   # Derivation for the PostgREST Haskell package, including the executable,
   # libraries and documentation. We disable running the test suite on Nix
   # builds, as they require a database to be set up.
-  postgrestWithLib =
+  postgrestPackage =
     pkgs.haskell.lib.dontCheck drv;
 
   # Derivation for just the PostgREST binary, where we strip all dynamic
   # libraries and documentation, leaving only the executable.
   postgrest =
-    pkgs.haskell.lib.justStaticExecutables postgrestWithLib;
+    pkgs.haskell.lib.justStaticExecutables postgrestPackage;
 
   # Environment in which PostgREST can be built with cabal, useful e.g. for
   # defining a shell for nix-shell.
