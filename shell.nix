@@ -11,6 +11,7 @@ pkgs.lib.overrideDerivation env (
         tests
         style
         lint
+        loadDocker
       ];
 
     shellHook =
