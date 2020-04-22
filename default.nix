@@ -53,4 +53,11 @@ rec {
   # Utility for updating the pinned version of Nixpkgs.
   nixpkgsUpgrade =
     pkgs.callPackage nix/nixpkgs-upgrade.nix {};
+
+  # Static executable.
+  postgrestStatic =
+    pkgs.callPackage nix/static.nix {
+      inherit pkgs name src;
+      compiler = "ghc865";
+    };
 }
