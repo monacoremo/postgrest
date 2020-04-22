@@ -28,13 +28,17 @@ let
           final: prev:
             {
               # Add our source package.
-              "${name}" = prev.callCabal2nix name src {};
+              "${name}" =
+                prev.callPackage ./postgrest.nix { inherit name src; };
+              ## FIXME callCabal2nix does not work:
+              #prev.callCabal2nix name src {};
 
               # The tests for the packages below took a long time on static
               # builds, so we disable them for now - to be investigated.
               happy = self.haskell.lib.dontCheck prev.happy;
               text-short = self.haskell.lib.dontCheck prev.text-short;
               jose = self.haskell.lib.dontCheck prev.jose;
+              tls = self.haskell.lib.dontCheck prev.tls;
             };
       in
         # Override the set of Haskell packages at
@@ -66,5 +70,5 @@ let
       integer-simple = true;
     };
 in
-# Return the fully static derivation of our source package.
+  # Return the fully static derivation of our source package.
 survey.haskellPackages."${name}"

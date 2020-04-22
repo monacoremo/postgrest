@@ -34,7 +34,7 @@ let
 
   # Static derivation for the PostgREST executable.
   drvStatic =
-    pkgs.callPackage nix/static.nix {
+    import nix/static.nix {
       inherit pkgs name src;
       # Currently only works with GHC 8.6.5.
       compiler = "ghc865";
