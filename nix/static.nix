@@ -18,8 +18,8 @@ let
       };
 
   # This overlay adds our source package and applies adjustments to the
-  # derivation of other packages that it depends on. The overlay applies to the
-  # `integer-simple` variant for the given compiler, which we will later use
+  # derivation of other packages that it depends on. The overlay applies to 
+  # Haskell packages for the given compiler, which we will later use
   # with the static-haskell-nix survey.
   overlay =
     self: super:
@@ -42,14 +42,13 @@ let
             };
       in
         # Override the set of Haskell packages at
-        # pkgs.haskell.packages.integer-simple."${compiler}".
+        # pkgs.haskell.packages."${compiler}".
         {
           haskell = super.haskell // {
             packages = super.haskell.packages // {
-              integer-simple = super.haskell.packages.integer-simple // {
-                "${compiler}" = super.haskell.packages.integer-simple."${compiler}".override
+              "${compiler}" = 
+                super.haskell.packages."${compiler}".override
                   { inherit overrides; };
-              };
             };
           };
         };
@@ -62,13 +61,7 @@ let
   # fully static Haskell executables, including one for the our source package
   # that we added through the overlay.
   survey =
-    import "${static-haskell-nix}/survey" {
-      inherit normalPkgs compiler;
-      # Choose the integer-simple variant that does not link in GMP (which could
-      # be problematic due to its LGPL license). This way, the survey also picks
-      # the haskell packages that we modified with the overlay above.
-      integer-simple = true;
-    };
+    import "${static-haskell-nix}/survey" { inherit normalPkgs compiler; };
 in
   # Return the fully static derivation of our source package.
 survey.haskellPackages."${name}"
