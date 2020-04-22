@@ -28,8 +28,20 @@ let
   pkgs =
     import pinnedPkgs { inherit overlays; };
 
+  # Base dynamic derivation for the PostgREST package.
   drv =
     pkgs.haskellPackages.callCabal2nix name src {};
+
+  # Static derivation for the PostgREST executable.
+  drvStatic =
+    pkgs.callPackage nix/static.nix {
+      inherit pkgs name src;
+      # Currently only works with GHC 8.6.5.
+      compiler = "ghc865";
+    };
+
+  lib =
+    pkgs.haskell.lib;
 in
 rec {
   inherit pkgs pinnedPkgs;
@@ -38,12 +50,14 @@ rec {
   # libraries and documentation. We disable running the test suite on Nix
   # builds, as they require a database to be set up.
   postgrestWithLib =
-    pkgs.haskell.lib.dontCheck drv;
+    lib.dontCheck drv;
 
   # Derivation for just the PostgREST binary, where we strip all dynamic
-  # libraries and documentation, leaving only the executable.
+  # libraries and documentation, leaving only the executable. Note that the
+  # executable is static with regards to Haskell libraries, but not system
+  # libraries like glibc and libpq.
   postgrest =
-    pkgs.haskell.lib.justStaticExecutables postgrestWithLib;
+    lib.justStaticExecutables postgrestWithLib;
 
   # Environment in which PostgREST can be built with cabal, useful e.g. for
   # defining a shell for nix-shell.
@@ -56,8 +70,5 @@ rec {
 
   # Static executable.
   postgrestStatic =
-    pkgs.callPackage nix/static.nix {
-      inherit pkgs name src;
-      compiler = "ghc865";
-    };
+    lib.justStaticExecutables (lib.dontCheck drvStatic);
 }
