@@ -28,18 +28,17 @@ let
           final: prev:
             {
               # Add our source package.
-              "${name}" =
-                #prev.callPackage ./postgrest.nix { inherit name src; };
-                prev.callCabal2nix name src {};
+              "${name}" = prev.callCabal2nix name src {};
 
-              Cabal = prev.Cabal_3_2_0_0;
+              # cabal2nix depends on Cabal 3.0.*, while our pinned version of Nixpkgs 
+              # only provides 2.4 or 3.2. So we pinned 3.0.0.0 in ./Cabal.nix
+              cabal2nix =
+                prev.cabal2nix.overrideScope 
+                  (self: super: { Cabal = self.callPackage ./Cabal.nix {}; });
 
               # The tests for the packages below took a long time on static
               # builds, so we disable them for now - to be investigated.
               happy = self.haskell.lib.dontCheck prev.happy;
-              text-short = self.haskell.lib.dontCheck prev.text-short;
-              jose = self.haskell.lib.dontCheck prev.jose;
-              tls = self.haskell.lib.dontCheck prev.tls;
             };
       in
         # Override the set of Haskell packages at
