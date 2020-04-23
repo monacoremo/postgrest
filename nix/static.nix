@@ -18,7 +18,7 @@ let
       };
 
   # This overlay adds our source package and applies adjustments to the
-  # derivation of other packages that it depends on. The overlay applies to 
+  # derivation of other packages that it depends on. The overlay applies to
   # Haskell packages for the given compiler, which we will later use
   # with the static-haskell-nix survey.
   overlay =
@@ -29,9 +29,10 @@ let
             {
               # Add our source package.
               "${name}" =
-                prev.callPackage ./postgrest.nix { inherit name src; };
-              ## FIXME callCabal2nix does not work:
-              #prev.callCabal2nix name src {};
+                #prev.callPackage ./postgrest.nix { inherit name src; };
+                prev.callCabal2nix name src {};
+
+              Cabal = prev.Cabal_3_2_0_0;
 
               # The tests for the packages below took a long time on static
               # builds, so we disable them for now - to be investigated.
@@ -46,7 +47,7 @@ let
         {
           haskell = super.haskell // {
             packages = super.haskell.packages // {
-              "${compiler}" = 
+              "${compiler}" =
                 super.haskell.packages."${compiler}".override
                   { inherit overrides; };
             };
