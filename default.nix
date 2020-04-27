@@ -42,6 +42,12 @@ let
 
   drv =
     pkgs.haskellPackages.callCabal2nix name src {};
+
+  compiler =
+    "ghc883";
+
+  cross =
+    pkgs.callPackage nix/cross.nix { inherit name src compiler; };
 in
 rec {
   inherit pkgs pinnedPkgs;
@@ -72,4 +78,7 @@ rec {
         inherit postgresqlVersions;
         postgrestBuildEnv = env;
       };
+
+  aarch64 =
+    cross.aarch64;
 }
