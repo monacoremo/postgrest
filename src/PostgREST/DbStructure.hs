@@ -21,6 +21,7 @@ module PostgREST.DbStructure (
 , accessibleProcs
 , schemaDescription
 , getPgVersion
+, loadLib
 ) where
 
 import qualified Data.HashMap.Strict as M
@@ -49,7 +50,7 @@ import PostgREST.Types
 getDbStructure :: [Schema] -> PgVersion -> HT.Transaction DbStructure
 getDbStructure schemas pgVer = do
   HT.sql "set local schema ''" -- This voids the search path. The following queries need this for getting the fully qualified name(schema.name) of every db object
-  HT.sql $(FileEmbed.embedFile "src/PostgREST/lib.sql")
+  loadLib
 
   tabs    <- HT.statement () allTables
   cols    <- HT.statement schemas $ allColumns tabs
@@ -230,39 +231,17 @@ accessibleTables =
  where
   sql = [q|
     select
-      n.nspname as table_schema,
-      relname as table_name,
-      d.description as table_description,
-      (
-        c.relkind in ('r', 'v', 'f')
-        and (pg_relation_is_updatable(c.oid::regclass, false) & 8) = 8
-        -- The function `pg_relation_is_updateable` returns a bitmask where 8
-        -- corresponds to `1 << CMD_INSERT` in the PostgreSQL source code, i.e.
-        -- it's possible to insert into the relation.
-        or (exists (
-          select 1
-          from pg_trigger
-          where
-            pg_trigger.tgrelid = c.oid
-            and (pg_trigger.tgtype::integer & 69) = 69)
-            -- The trigger type `tgtype` is a bitmask where 69 corresponds to
-            -- TRIGGER_TYPE_ROW + TRIGGER_TYPE_INSTEAD + TRIGGER_TYPE_INSERT
-            -- in the PostgreSQL source code.
-        )
-      ) as insertable
+      table_schema,
+      table_name,
+      table_description,
+      insertable
     from
-      pg_class c
-      join pg_namespace n on n.oid = c.relnamespace
-      left join pg_catalog.pg_description as d on d.objoid = c.oid and d.objsubid = 0
+      pg_temp.postgrest_tables
     where
-      c.relkind in ('v', 'r', 'm', 'f')
-      and n.nspname = $1
-      and (
-        pg_has_role(c.relowner, 'USAGE')
-        or has_table_privilege(c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
-        or has_any_column_privilege(c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
-      )
-    order by relname |]
+      table_schema = $1
+      and is_accessible
+    order by
+      table_name |]
 
 addForeignKeys :: [Relation] -> [Column] -> [Column]
 addForeignKeys rels = map addFk
@@ -385,27 +364,14 @@ allTables =
   H.Statement sql HE.noParams decodeTables True
  where
   sql = [q|
-    SELECT
-      n.nspname AS table_schema,
-      c.relname AS table_name,
-      NULL AS table_description,
-      (
-        c.relkind IN ('r', 'v','f')
-        AND (pg_relation_is_updatable(c.oid::regclass, FALSE) & 8) = 8
-        OR EXISTS (
-          SELECT 1
-          FROM pg_trigger
-          WHERE
-            pg_trigger.tgrelid = c.oid
-            AND (pg_trigger.tgtype::integer & 69) = 69
-        )
-      ) AS insertable
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE c.relkind IN ('v','r','m','f')
-      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-    GROUP BY table_schema, table_name, insertable
-    ORDER BY table_schema, table_name |]
+    select
+      table_schema,
+      table_name,
+      null as table_description,
+      insertable
+    from
+      pg_temp.postgrest_tables
+    order by table_schema |]
 
 allColumns :: [Table] -> H.Statement [Schema] [Column]
 allColumns tabs =
@@ -742,3 +708,8 @@ getPgVersion = H.statement () $ H.Statement sql HE.noParams versionRow False
   where
     sql = "SELECT current_setting('server_version_num')::integer, current_setting('server_version')"
     versionRow = HD.singleRow $ PgVersion <$> column HD.int4 <*> column HD.text
+
+
+loadLib :: HT.Transaction ()
+loadLib =
+  HT.sql $(FileEmbed.embedFile "src/PostgREST/lib.sql")

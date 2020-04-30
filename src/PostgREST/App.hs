@@ -329,6 +329,8 @@ app dbStructure proc cols conf apiRequest =
               toTableInfo = map (\t -> let (s, tn) = (tableSchema t, tableName t) in (t, tableCols dbStructure s tn, tablePKCols dbStructure s tn))
               encodeApi ti sd procs = encodeOpenAPI (concat $ M.elems procs) (toTableInfo ti) uri' sd $ dbPrimaryKeys dbStructure
 
+          loadLib
+
           body <- encodeApi <$>
             H.statement tSchema accessibleTables <*>
             H.statement tSchema schemaDescription <*>
