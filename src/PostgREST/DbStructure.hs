@@ -13,6 +13,7 @@ These queries are executed once at startup or when PostgREST is reloaded.
 {-# LANGUAGE NamedFieldPuns        #-}
 {-# LANGUAGE QuasiQuotes           #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE TemplateHaskell       #-}
 {-# LANGUAGE TypeSynonymInstances  #-}
 module PostgREST.DbStructure (
   getDbStructure
@@ -22,31 +23,35 @@ module PostgREST.DbStructure (
 , getPgVersion
 ) where
 
-import qualified Data.HashMap.Strict as M
-import qualified Data.List           as L
-import qualified Data.Text           as T
-import qualified Hasql.Decoders      as HD
-import qualified Hasql.Encoders      as HE
-import qualified Hasql.Session       as H
-import qualified Hasql.Statement     as H
-import qualified Hasql.Transaction   as HT
-
-import Data.Set                      as S (fromList)
-import Data.Text                     (breakOn, dropAround, split,
-                                      splitOn, strip)
-import GHC.Exts                      (groupWith)
-import Protolude                     hiding (toS)
-import Protolude.Conv                (toS)
-import Protolude.Unsafe              (unsafeHead)
-import Text.InterpolatedString.Perl6 (q, qc)
-
-import PostgREST.Private.Common
-import PostgREST.Types
+import           Control.Exception
+import qualified Data.Aeson                    as Aeson
+import qualified Data.FileEmbed                as FileEmbed
+import qualified Data.HashMap.Strict           as M
+import qualified Data.List                     as L
+import           Data.Set                      as S (fromList)
+import           Data.String
+import           Data.Text                     (breakOn, dropAround,
+                                                split, splitOn, strip)
+import qualified Data.Text                     as T
+import           GHC.Exts                      (groupWith)
+import qualified Hasql.Decoders                as HD
+import qualified Hasql.Encoders                as HE
+import qualified Hasql.Session                 as H
+import qualified Hasql.Statement               as H
+import qualified Hasql.Transaction             as HT
+import           PostgREST.Private.Common
+import           PostgREST.Types
+import           Protolude                     hiding (toS)
+import           Protolude.Conv                (toS)
+import           Protolude.Unsafe              (unsafeHead)
+import           Text.InterpolatedString.Perl6 (q, qc)
 
 getDbStructure :: [Schema] -> PgVersion -> HT.Transaction DbStructure
 getDbStructure schemas pgVer = do
   HT.sql "set local schema ''" -- This voids the search path. The following queries need this for getting the fully qualified name(schema.name) of every db object
-  tabs    <- HT.statement () allTables
+  raw <- getRawDbStructure schemas
+
+  let tabs = rawDbTables raw
   cols    <- HT.statement schemas $ allColumns tabs
   srcCols <- HT.statement schemas $ allSourceColumns cols pgVer
   m2oRels <- HT.statement () $ allM2ORels tabs cols
@@ -374,33 +379,6 @@ addViewPrimaryKeys srcCols = concatMap (\pk ->
   let viewPks = (\(_, viewCol) -> PrimaryKey{pkTable=colTable viewCol, pkName=colName viewCol}) <$>
                 filter (\(col, _) -> colTable col == pkTable pk && colName col == pkName pk) srcCols in
   pk : viewPks)
-
-allTables :: H.Statement () [Table]
-allTables =
-  H.Statement sql HE.noParams decodeTables True
- where
-  sql = [q|
-    SELECT
-      n.nspname AS table_schema,
-      c.relname AS table_name,
-      NULL AS table_description,
-      (
-        c.relkind IN ('r', 'v','f')
-        AND (pg_relation_is_updatable(c.oid::regclass, FALSE) & 8) = 8
-        OR EXISTS (
-          SELECT 1
-          FROM pg_trigger
-          WHERE
-            pg_trigger.tgrelid = c.oid
-            AND (pg_trigger.tgtype::integer & 69) = 69
-        )
-      ) AS insertable
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE c.relkind IN ('v','r','m','f')
-      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-    GROUP BY table_schema, table_name, insertable
-    ORDER BY table_schema, table_name |]
 
 allColumns :: [Table] -> H.Statement [Schema] [Column]
 allColumns tabs =
@@ -740,3 +718,36 @@ getPgVersion = H.statement () $ H.Statement sql HE.noParams versionRow False
   where
     sql = "SELECT current_setting('server_version_num')::integer, current_setting('server_version')"
     versionRow = HD.singleRow $ PgVersion <$> column HD.int4 <*> column HD.text
+
+
+
+-- RAW DB STRUCTURE
+
+
+getRawDbStructure :: [Schema] -> HT.Transaction RawDbStructure
+getRawDbStructure schemas =
+    do
+        value <- HT.statement schemas rawDbStructureQuery
+
+        case Aeson.fromJSON value of
+          Aeson.Success m ->
+              return m
+          Aeson.Error err ->
+              throw $ DbStructureDecodeException err
+
+data DbStructureDecodeException =
+    DbStructureDecodeException String
+    deriving Show
+
+instance Exception DbStructureDecodeException
+
+rawDbStructureQuery :: H.Statement [Schema] Aeson.Value
+rawDbStructureQuery =
+  let
+    sql =
+      $(FileEmbed.embedFile "dbstructure/query.sql")
+
+    decode =
+      HD.singleRow $ column HD.json
+  in
+  H.Statement sql (arrayParam HE.text) decode True

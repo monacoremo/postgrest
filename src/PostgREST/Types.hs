@@ -2,15 +2,18 @@
 Module      : PostgREST.Types
 Description : PostgREST common types and functions used by the rest of the modules
 -}
+{-# LANGUAGE DeriveAnyClass        #-}
 {-# LANGUAGE DeriveGeneric         #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 
 module PostgREST.Types where
 
+import           Data.Aeson (FromJSON)
+import qualified Data.Aeson as Aeson
+
 import Control.Lens.Getter (view)
 import Control.Lens.Tuple  (_1)
 
-import qualified Data.Aeson               as JSON
 import qualified Data.ByteString          as BS
 import qualified Data.ByteString.Internal as BS (c2w)
 import qualified Data.ByteString.Lazy     as BL
@@ -26,6 +29,18 @@ import Data.Tree
 import PostgREST.RangeQuery (NonnegRange)
 import Protolude            hiding (toS)
 import Protolude.Conv       (toS)
+
+data RawDbStructure =
+    RawDbStructure
+        { rawDbPgVer  :: PgVersion
+        , rawDbTables :: [Table]
+        }
+    deriving (Show, Eq, Generic)
+
+instance FromJSON RawDbStructure where
+    parseJSON =
+        Aeson.genericParseJSON aesonOptions
+
 
 -- | Enumeration of currently supported response content types
 data ContentType = CTApplicationJSON | CTSingularJSON
@@ -200,7 +215,11 @@ data Table = Table {
 , tableName        :: TableName
 , tableDescription :: Maybe Text
 , tableInsertable  :: Bool
-} deriving (Show, Ord)
+} deriving (Show, Ord, Generic)
+
+instance FromJSON Table where
+    parseJSON =
+        Aeson.genericParseJSON aesonOptions
 
 instance Eq Table where
   Table{tableSchema=s1,tableName=n1} == Table{tableSchema=s2,tableName=n2} = s1 == s2 && n1 == n2
@@ -409,9 +428,9 @@ type RpcQParam = (Text, Text)
 newtype GucHeader = GucHeader (CI.CI ByteString, ByteString)
   deriving (Show, Eq)
 
-instance JSON.FromJSON GucHeader where
-  parseJSON (JSON.Object o) = case headMay (M.toList o) of
-    Just (k, JSON.String s) | M.size o == 1 -> pure $ GucHeader (CI.mk $ toS k, toS s)
+instance FromJSON GucHeader where
+  parseJSON (Aeson.Object o) = case headMay (M.toList o) of
+    Just (k, Aeson.String s) | M.size o == 1 -> pure $ GucHeader (CI.mk $ toS k, toS s)
                             | otherwise     -> mzero
     _ -> mzero
   parseJSON _          = mzero
@@ -486,7 +505,17 @@ fstFieldNames (Node (sel, _) _) =
 data PgVersion = PgVersion {
   pgvNum  :: Int32
 , pgvName :: Text
-} deriving (Eq, Show)
+} deriving (Eq, Show, Generic)
+
+instance FromJSON PgVersion where
+    parseJSON =
+        Aeson.genericParseJSON aesonOptions
+
+aesonOptions :: Aeson.Options
+aesonOptions =
+    Aeson.defaultOptions
+        { Aeson.fieldLabelModifier = Aeson.camelTo2 '_'
+        }
 
 instance Ord PgVersion where
   (PgVersion v1 _) `compare` (PgVersion v2 _) = v1 `compare` v2
