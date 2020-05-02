@@ -23,6 +23,7 @@ module PostgREST.DbStructure (
 , getPgVersion
 ) where
 
+
 import           Control.Exception
 import qualified Data.Aeson                    as Aeson
 import qualified Data.FileEmbed                as FileEmbed
@@ -46,6 +47,7 @@ import           Protolude.Conv                (toS)
 import           Protolude.Unsafe              (unsafeHead)
 import           Text.InterpolatedString.Perl6 (q)
 
+
 getDbStructure :: [Schema] -> PgVersion -> HT.Transaction DbStructure
 getDbStructure schemas pgVer = do
   HT.sql "set local schema ''" -- This voids the search path. The following queries need this for getting the fully qualified name(schema.name) of every db object
@@ -56,6 +58,7 @@ getDbStructure schemas pgVer = do
     cols = rawDbColumns raw
     srcCols = rawDbSourceColumns raw
     oldSrcCols = fmap (\src -> (srcSource src, srcView src)) srcCols
+
   m2oRels <- HT.statement () $ allM2ORels tabs cols
   keys    <- HT.statement () $ allPrimaryKeys tabs
   procs   <- HT.statement schemas allProcs
@@ -72,6 +75,7 @@ getDbStructure schemas pgVer = do
     , dbProcs = procs
     , pgVersion = pgVer
     }
+
 
 decodeTables :: HD.Result [Table]
 decodeTables =

@@ -411,27 +411,33 @@ with
          from target_entries
        )
        select
-         source_column.columns as src_source,
-         view_column.columns as src_view
+         sch.nspname as table_schema,
+         tbl.relname as table_name,
+         col.attname as table_column_name,
+         res.view_schema,
+         res.view_name,
+         res.view_colum_name,
+         source_column.c1 as src_source,
+         view_column.c2 as src_view
        from results res
        join pg_class tbl on tbl.oid::text = res.resorigtbl
        join pg_attribute col on col.attrelid = tbl.oid and col.attnum::text = res.resorigcol
        join pg_namespace sch on sch.oid = tbl.relnamespace,
        lateral (
-            select columns
-            from columns
+            select c1
+            from columns c1
             where
-                sch.nspname = columns.col_schema
-                and tbl.relname = columns.col_table_name
-                and col.attname = columns.col_name
+                sch.nspname = c1.col_schema
+                and tbl.relname = c1.col_table_name
+                and col.attname = c1.col_name
        ) source_column,
        lateral (
-            select columns
-            from columns
+            select c2
+            from columns c2
             where
-                res.view_schema = columns.col_schema
-                and res.view_name = columns.col_table_name
-                and res.view_colum_name = columns.col_name
+                res.view_schema = c2.col_schema
+                and res.view_name = c2.col_table_name
+                and res.view_colum_name = c2.col_name
        ) as view_column
        where resorigtbl <> '0'
        order by view_schema, view_name, view_colum_name
