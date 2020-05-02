@@ -108,7 +108,7 @@ with
 
   columns as (
      SELECT DISTINCT
-         col_table,
+         col_table.tables as col_table,
          info.column_name AS col_name,
          info.table_schema AS schema,
          info.description AS col_description,
@@ -119,7 +119,7 @@ with
          info.character_maximum_length AS col_max_len,
          info.numeric_precision AS col_precision,
          info.column_default AS col_default,
-         enum_info.vals AS col_enum,
+         coalesce(enum_info.vals, array[]::text[]) AS col_enum,
          null as col_f_k
      FROM (
          -- CTE based on pg_catalog to get PRIMARY/FOREIGN key and UNIQUE columns outside api schema

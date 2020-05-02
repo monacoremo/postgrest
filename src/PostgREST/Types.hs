@@ -34,6 +34,7 @@ data RawDbStructure =
     RawDbStructure
         { rawDbPgVer  :: PgVersion
         , rawDbTables :: [Table]
+        , rawDbColumns :: [Column]
         }
     deriving (Show, Eq, Generic)
 
@@ -227,7 +228,11 @@ instance Eq Table where
 tableQi :: Table -> QualifiedIdentifier
 tableQi Table{tableSchema=s, tableName=n} = QualifiedIdentifier s n
 
-newtype ForeignKey = ForeignKey { fkCol :: Column } deriving (Show, Eq, Ord)
+newtype ForeignKey = ForeignKey { fkCol :: Column } deriving (Show, Eq, Ord, Generic)
+
+instance FromJSON ForeignKey where
+    parseJSON =
+        Aeson.genericParseJSON aesonOptions
 
 data Column =
     Column {
@@ -243,7 +248,11 @@ data Column =
     , colDefault     :: Maybe Text
     , colEnum        :: [Text]
     , colFK          :: Maybe ForeignKey
-    } deriving (Show, Ord)
+    } deriving (Show, Ord, Generic)
+
+instance FromJSON Column where
+    parseJSON =
+        Aeson.genericParseJSON aesonOptions
 
 instance Eq Column where
   Column{colTable=t1,colName=n1} == Column{colTable=t2,colName=n2} = t1 == t2 && n1 == n2

@@ -23,11 +23,6 @@ module PostgREST.DbStructure (
 , getPgVersion
 ) where
 
-
-
-
-
-
 import           Control.Exception
 import qualified Data.Aeson                    as Aeson
 import qualified Data.FileEmbed                as FileEmbed
@@ -56,8 +51,9 @@ getDbStructure schemas pgVer = do
   HT.sql "set local schema ''" -- This voids the search path. The following queries need this for getting the fully qualified name(schema.name) of every db object
   raw <- getRawDbStructure schemas
 
-  let tabs = rawDbTables raw
-  cols    <- HT.statement schemas $ allColumns tabs
+  let
+    tabs = rawDbTables raw
+    cols = rawDbColumns raw
   srcCols <- HT.statement schemas $ allSourceColumns cols pgVer
   m2oRels <- HT.statement () $ allM2ORels tabs cols
   keys    <- HT.statement () $ allPrimaryKeys tabs
@@ -84,21 +80,6 @@ decodeTables =
                  <*> column HD.text
                  <*> nullableColumn HD.text
                  <*> column HD.bool
-
-decodeColumns :: [Table] -> HD.Result [Column]
-decodeColumns tables =
-  mapMaybe (columnFromRow tables) <$> HD.rowList colRow
- where
-  colRow =
-    (,,,,,,,,,,,)
-      <$> column HD.text <*> column HD.text
-      <*> column HD.text <*> nullableColumn HD.text
-      <*> column HD.int4 <*> column HD.bool
-      <*> column HD.text <*> column HD.bool
-      <*> nullableColumn HD.int4
-      <*> nullableColumn HD.int4
-      <*> nullableColumn HD.text
-      <*> nullableColumn HD.text
 
 decodeRels :: [Table] -> [Column] -> HD.Result [Relation]
 decodeRels tables cols =
@@ -384,152 +365,6 @@ addViewPrimaryKeys srcCols = concatMap (\pk ->
   let viewPks = (\(_, viewCol) -> PrimaryKey{pkTable=colTable viewCol, pkName=colName viewCol}) <$>
                 filter (\(col, _) -> colTable col == pkTable pk && colName col == pkName pk) srcCols in
   pk : viewPks)
-
-allColumns :: [Table] -> H.Statement [Schema] [Column]
-allColumns tabs =
- H.Statement sql (arrayParam HE.text) (decodeColumns tabs) True
- where
-  sql = [q|
-    SELECT DISTINCT
-        info.table_schema AS schema,
-        info.table_name AS table_name,
-        info.column_name AS name,
-        info.description AS description,
-        info.ordinal_position AS position,
-        info.is_nullable::boolean AS nullable,
-        info.data_type AS col_type,
-        info.is_updatable::boolean AS updatable,
-        info.character_maximum_length AS max_len,
-        info.numeric_precision AS precision,
-        info.column_default AS default_value,
-        array_to_string(enum_info.vals, ',') AS enum
-    FROM (
-        -- CTE based on pg_catalog to get PRIMARY/FOREIGN key and UNIQUE columns outside api schema
-        WITH key_columns AS (
-             SELECT
-               r.oid AS r_oid,
-               c.oid AS c_oid,
-               n.nspname,
-               c.relname,
-               r.conname,
-               r.contype,
-               unnest(r.conkey) AS conkey
-             FROM
-               pg_catalog.pg_constraint r,
-               pg_catalog.pg_class c,
-               pg_catalog.pg_namespace n
-             WHERE
-               r.contype IN ('f', 'p', 'u')
-               AND c.relkind IN ('r', 'v', 'f', 'm')
-               AND r.conrelid = c.oid
-               AND c.relnamespace = n.oid
-               AND n.nspname <> ANY (ARRAY['pg_catalog', 'information_schema'] || $1)
-        ),
-        /*
-        -- CTE based on information_schema.columns
-        -- changed:
-        -- remove the owner filter
-        -- limit columns to the ones in the api schema or PK/FK columns
-        */
-        columns AS (
-            SELECT
-                nc.nspname::name AS table_schema,
-                c.relname::name AS table_name,
-                a.attname::name AS column_name,
-                d.description AS description,
-                a.attnum::integer AS ordinal_position,
-                pg_get_expr(ad.adbin, ad.adrelid)::text AS column_default,
-                not (a.attnotnull OR t.typtype = 'd' AND t.typnotnull) AS is_nullable,
-                    CASE
-                        WHEN t.typtype = 'd' THEN
-                        CASE
-                            WHEN bt.typelem <> 0::oid AND bt.typlen = (-1) THEN 'ARRAY'::text
-                            WHEN nbt.nspname = 'pg_catalog'::name THEN format_type(t.typbasetype, NULL::integer)
-                            ELSE format_type(a.atttypid, a.atttypmod)
-                        END
-                        ELSE
-                        CASE
-                            WHEN t.typelem <> 0::oid AND t.typlen = (-1) THEN 'ARRAY'::text
-                            WHEN nt.nspname = 'pg_catalog'::name THEN format_type(a.atttypid, NULL::integer)
-                            ELSE format_type(a.atttypid, a.atttypmod)
-                        END
-                    END::text AS data_type,
-                information_schema._pg_char_max_length(
-                    information_schema._pg_truetypid(a.*, t.*),
-                    information_schema._pg_truetypmod(a.*, t.*)
-                )::integer AS character_maximum_length,
-                information_schema._pg_numeric_precision(
-                    information_schema._pg_truetypid(a.*, t.*),
-                    information_schema._pg_truetypmod(a.*, t.*)
-                )::integer AS numeric_precision,
-                COALESCE(bt.typname, t.typname)::name AS udt_name,
-                (
-                    c.relkind in ('r', 'v', 'f')
-                    AND pg_column_is_updatable(c.oid::regclass, a.attnum, false)
-                )::bool is_updatable
-            FROM pg_attribute a
-                LEFT JOIN key_columns kc
-                    ON kc.conkey = a.attnum AND kc.c_oid = a.attrelid
-                LEFT JOIN pg_catalog.pg_description AS d
-                    ON d.objoid = a.attrelid and d.objsubid = a.attnum
-                LEFT JOIN pg_attrdef ad
-                    ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
-                JOIN (pg_class c JOIN pg_namespace nc ON c.relnamespace = nc.oid)
-                    ON a.attrelid = c.oid
-                JOIN (pg_type t JOIN pg_namespace nt ON t.typnamespace = nt.oid)
-                    ON a.atttypid = t.oid
-                LEFT JOIN (pg_type bt JOIN pg_namespace nbt ON bt.typnamespace = nbt.oid)
-                    ON t.typtype = 'd' AND t.typbasetype = bt.oid
-                LEFT JOIN (pg_collation co JOIN pg_namespace nco ON co.collnamespace = nco.oid)
-                    ON a.attcollation = co.oid AND (nco.nspname <> 'pg_catalog'::name OR co.collname <> 'default'::name)
-            WHERE
-                NOT pg_is_other_temp_schema(nc.oid)
-                AND a.attnum > 0
-                AND NOT a.attisdropped
-                AND c.relkind in ('r', 'v', 'f', 'm')
-                -- Filter only columns that are FK/PK or in the api schema:
-                AND (nc.nspname = ANY ($1) OR kc.r_oid IS NOT NULL)
-        )
-        SELECT
-            table_schema,
-            table_name,
-            column_name,
-            description,
-            ordinal_position,
-            is_nullable,
-            data_type,
-            is_updatable,
-            character_maximum_length,
-            numeric_precision,
-            column_default,
-            udt_name
-        FROM columns
-        WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-    ) AS info
-    LEFT OUTER JOIN (
-        SELECT
-            n.nspname AS s,
-            t.typname AS n,
-            array_agg(e.enumlabel ORDER BY e.enumsortorder) AS vals
-        FROM pg_type t
-        JOIN pg_enum e ON t.oid = e.enumtypid
-        JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
-        GROUP BY s,n
-    ) AS enum_info ON (info.udt_name = enum_info.n)
-    ORDER BY schema, position |]
-
-columnFromRow :: [Table] ->
-                 (Text,        Text,        Text,
-                  Maybe Text,  Int32,       Bool,
-                  Text,        Bool,        Maybe Int32,
-                  Maybe Int32, Maybe Text,  Maybe Text)
-                 -> Maybe Column
-columnFromRow tabs (s, t, n, desc, pos, nul, typ, u, l, p, d, e) = buildColumn <$> table
-  where
-    buildColumn tbl = Column tbl n desc pos nul typ u l p d (parseEnum e) Nothing
-    table = find (\tbl -> tableSchema tbl == s && tableName tbl == t) tabs
-    parseEnum :: Maybe Text -> [Text]
-    parseEnum = maybe [] (split (==','))
 
 allM2ORels :: [Table] -> [Column] -> H.Statement () [Relation]
 allM2ORels tabs cols =
