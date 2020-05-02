@@ -23,7 +23,6 @@ module PostgREST.DbStructure (
 , getPgVersion
 ) where
 
-
 import           Control.Exception
 import qualified Data.Aeson                    as Aeson
 import qualified Data.FileEmbed                as FileEmbed
@@ -46,7 +45,6 @@ import           Protolude                     hiding (toS)
 import           Protolude.Conv                (toS)
 import           Protolude.Unsafe              (unsafeHead)
 import           Text.InterpolatedString.Perl6 (q)
-
 
 getDbStructure :: [Schema] -> PgVersion -> HT.Transaction DbStructure
 getDbStructure schemas pgVer = do
@@ -75,7 +73,6 @@ getDbStructure schemas pgVer = do
     , dbProcs = procs
     , pgVersion = pgVer
     }
-
 
 decodeTables :: HD.Result [Table]
 decodeTables =

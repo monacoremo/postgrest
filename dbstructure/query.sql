@@ -118,7 +118,7 @@ with
 
   columns as (
      SELECT DISTINCT
-         col_table.tables as col_table,
+         col_table as col_table,
          info.column_name AS col_name,
          info.table_schema AS col_schema,
          info.table_name as col_table_name,
@@ -241,11 +241,16 @@ with
          GROUP BY s,n
      ) AS enum_info ON (info.udt_name = enum_info.n)
      , lateral (
-        select tables
+        select
+          -- explicit columns needed for Postgres < 10
+          table_schema::text,
+          table_name::text,
+          table_description::text,
+          table_insertable::bool
         from tables
         where
-          tables.table_schema = info.table_schema
-          and tables.table_name = info.table_name
+          tables.table_schema::text = info.table_schema::text
+          and tables.table_name::text = info.table_name::text
      ) col_table
      ORDER BY col_schema, col_position
   ),
@@ -448,13 +453,13 @@ with
 
   select
     json_build_object(
-  --      'raw_db_procs', procs_agg.array_agg,
-  --      'raw_db_schema_description', schema_description_agg.array_agg,
-  --      'raw_db_accessible_tables', accessible_tables_agg.array_agg,
+        'raw_db_procs', procs_agg.array_agg,
+        'raw_db_schema_description', schema_description_agg.array_agg,
+        'raw_db_accessible_tables', accessible_tables_agg.array_agg,
         'raw_db_tables', coalesce(tables_agg.array_agg, array[]::record[]),
         'raw_db_columns', columns_agg.array_agg,
-  --      'raw_db_m2o_rels', m2o_rels_agg.array_agg,
-  --      'raw_db_primary_keys', primary_keys_agg.array_agg,
+        'raw_db_m2o_rels', m2o_rels_agg.array_agg,
+        'raw_db_primary_keys', primary_keys_agg.array_agg,
         'raw_db_source_columns', coalesce(source_columns_agg.array_agg, array[]::record[]),
         'raw_db_pg_ver', pg_version
     )::json as dbstructure
