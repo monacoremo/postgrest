@@ -44,7 +44,7 @@ import           PostgREST.Types
 import           Protolude                     hiding (toS)
 import           Protolude.Conv                (toS)
 import           Protolude.Unsafe              (unsafeHead)
-import           Text.InterpolatedString.Perl6 (q, qc)
+import           Text.InterpolatedString.Perl6 (q)
 
 getDbStructure :: [Schema] -> PgVersion -> HT.Transaction DbStructure
 getDbStructure schemas pgVer = do
@@ -54,14 +54,15 @@ getDbStructure schemas pgVer = do
   let
     tabs = rawDbTables raw
     cols = rawDbColumns raw
-  srcCols <- HT.statement schemas $ allSourceColumns cols pgVer
+    srcCols = rawDbSourceColumns raw
+    oldSrcCols = fmap (\src -> (srcSource src, srcView src)) srcCols
   m2oRels <- HT.statement () $ allM2ORels tabs cols
   keys    <- HT.statement () $ allPrimaryKeys tabs
   procs   <- HT.statement schemas allProcs
 
-  let rels = addM2MRels . addO2MRels $ addViewM2ORels srcCols m2oRels
+  let rels = addM2MRels . addO2MRels $ addViewM2ORels oldSrcCols m2oRels
       cols' = addForeignKeys rels cols
-      keys' = addViewPrimaryKeys srcCols keys
+      keys' = addViewPrimaryKeys oldSrcCols keys
 
   return DbStructure {
       dbTables = tabs
@@ -99,22 +100,6 @@ decodePks tables =
   mapMaybe (pkFromRow tables) <$> HD.rowList pkRow
  where
   pkRow = (,,) <$> column HD.text <*> column HD.text <*> column HD.text
-
-decodeSourceColumns :: [Column] -> HD.Result [SourceColumn]
-decodeSourceColumns cols =
-  mapMaybe (sourceColumnFromRow cols) <$> HD.rowList srcColRow
- where
-  srcColRow = (,,,,,)
-    <$> column HD.text <*> column HD.text
-    <*> column HD.text <*> column HD.text
-    <*> column HD.text <*> column HD.text
-
-sourceColumnFromRow :: [Column] -> (Text,Text,Text,Text,Text,Text) -> Maybe SourceColumn
-sourceColumnFromRow allCols (s1,t1,c1,s2,t2,c2) = (,) <$> col1 <*> col2
-  where
-    col1 = findCol s1 t1 c1
-    col2 = findCol s2 t2 c2
-    findCol s t c = find (\col -> (tableSchema . colTable) col == s && (tableName . colTable) col == t && colName col == c) allCols
 
 decodeProcs :: HD.Result ProcsMap
 decodeProcs =
@@ -293,17 +278,17 @@ When having t1_view.c1 and a t2_view.c2 source columns, we need to add a View-Vi
 
 The logic for composite pks is similar just need to make sure all the Relation columns have source columns.
 -}
-addViewM2ORels :: [SourceColumn] -> [Relation] -> [Relation]
+addViewM2ORels :: [OldSourceColumn] -> [Relation] -> [Relation]
 addViewM2ORels allSrcCols = concatMap (\rel ->
   rel : case rel of
     Relation{relType=M2O, relTable, relColumns, relConstraint, relFTable, relFColumns} ->
 
-      let srcColsGroupedByView :: [Column] -> [[SourceColumn]]
+      let srcColsGroupedByView :: [Column] -> [[OldSourceColumn]]
           srcColsGroupedByView relCols = L.groupBy (\(_, viewCol1) (_, viewCol2) -> colTable viewCol1 == colTable viewCol2) $
                                          filter (\(c, _) -> c `elem` relCols) allSrcCols
           relSrcCols = srcColsGroupedByView relColumns
           relFSrcCols = srcColsGroupedByView relFColumns
-          getView :: [SourceColumn] -> Table
+          getView :: [OldSourceColumn] -> Table
           getView = colTable . snd . unsafeHead
           srcCols `allSrcColsOf` cols = S.fromList (fst <$> srcCols) == S.fromList cols
           -- Relation is dependent on the order of relColumns and relFColumns to get the join conditions right in the generated query.
@@ -360,7 +345,7 @@ addM2MRels rels = rels ++ addMirrorRel (mapMaybe junction2Rel junctions)
     addMirrorRel = concatMap (\rel@(Relation t c _ ft fc _ (Just (Junction jt const1 jc1 const2 jc2))) ->
       [rel, Relation ft fc Nothing t c M2M (Just (Junction jt const2 jc2 const1 jc1))])
 
-addViewPrimaryKeys :: [SourceColumn] -> [PrimaryKey] -> [PrimaryKey]
+addViewPrimaryKeys :: [OldSourceColumn] -> [PrimaryKey] -> [PrimaryKey]
 addViewPrimaryKeys srcCols = concatMap (\pk ->
   let viewPks = (\(_, viewCol) -> PrimaryKey{pkTable=colTable viewCol, pkName=colName viewCol}) <$>
                 filter (\(col, _) -> colTable col == pkTable pk && colName col == pkName pk) srcCols in
@@ -483,75 +468,6 @@ allPrimaryKeys tabs =
 pkFromRow :: [Table] -> (Schema, Text, Text) -> Maybe PrimaryKey
 pkFromRow tabs (s, t, n) = PrimaryKey <$> table <*> pure n
   where table = find (\tbl -> tableSchema tbl == s && tableName tbl == t) tabs
-
-allSourceColumns :: [Column] -> PgVersion -> H.Statement [Schema] [SourceColumn]
-allSourceColumns cols pgVer =
-  H.Statement sql (arrayParam HE.text) (decodeSourceColumns cols) True
-  -- query explanation at https://gist.github.com/steve-chavez/7ee0e6590cddafb532e5f00c46275569
-  where
-    subselectRegex :: Text
-    -- "result" appears when the subselect is used inside "case when", see `authors_have_book_in_decade` fixture
-    -- "resno"  appears in every other case
-    -- when copying the query into pg make sure you omit one backslash from \\d+, it should be like `\d+` for the regex
-    subselectRegex | pgVer < pgVersion100 = ":subselect {.*?:constraintDeps <>} :location \\d+} :res(no|ult)"
-                   | otherwise = ":subselect {.*?:stmt_len 0} :location \\d+} :res(no|ult)"
-    sql = [qc|
-      with
-      views as (
-        select
-          n.nspname   as view_schema,
-          c.relname   as view_name,
-          r.ev_action as view_definition
-        from pg_class c
-        join pg_namespace n on n.oid = c.relnamespace
-        join pg_rewrite r on r.ev_class = c.oid
-        where c.relkind in ('v', 'm') and n.nspname = ANY ($1)
-      ),
-      removed_subselects as(
-        select
-          view_schema, view_name,
-          regexp_replace(view_definition, '{subselectRegex}', '', 'g') as x
-        from views
-      ),
-      target_lists as(
-        select
-          view_schema, view_name,
-          regexp_split_to_array(x, 'targetList') as x
-        from removed_subselects
-      ),
-      last_target_list_wo_tail as(
-        select
-          view_schema, view_name,
-          (regexp_split_to_array(x[array_upper(x, 1)], ':onConflict'))[1] as x
-        from target_lists
-      ),
-      target_entries as(
-        select
-          view_schema, view_name,
-          unnest(regexp_split_to_array(x, 'TARGETENTRY')) as entry
-        from last_target_list_wo_tail
-      ),
-      results as(
-        select
-          view_schema, view_name,
-          substring(entry from ':resname (.*?) :') as view_colum_name,
-          substring(entry from ':resorigtbl (.*?) :') as resorigtbl,
-          substring(entry from ':resorigcol (.*?) :') as resorigcol
-        from target_entries
-      )
-      select
-        sch.nspname as table_schema,
-        tbl.relname as table_name,
-        col.attname as table_column_name,
-        res.view_schema,
-        res.view_name,
-        res.view_colum_name
-      from results res
-      join pg_class tbl on tbl.oid::text = res.resorigtbl
-      join pg_attribute col on col.attrelid = tbl.oid and col.attnum::text = res.resorigcol
-      join pg_namespace sch on sch.oid = tbl.relnamespace
-      where resorigtbl <> '0'
-      order by view_schema, view_name, view_colum_name; |]
 
 getPgVersion :: H.Session PgVersion
 getPgVersion = H.statement () $ H.Statement sql HE.noParams versionRow False

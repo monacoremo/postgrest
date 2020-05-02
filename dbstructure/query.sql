@@ -1,5 +1,15 @@
 with
 
+
+  -- Postgres version
+
+  pg_version as (
+    SELECT
+      current_setting('server_version_num')::integer as pgv_num,
+      current_setting('server_version') as pgv_name
+  ),
+
+
   -- Procedures
 
   procs as (
@@ -110,7 +120,8 @@ with
      SELECT DISTINCT
          col_table.tables as col_table,
          info.column_name AS col_name,
-         info.table_schema AS schema,
+         info.table_schema AS col_schema,
+         info.table_name as col_table_name,
          info.description AS col_description,
          info.ordinal_position AS col_position,
          info.is_nullable::boolean AS col_nullable,
@@ -236,7 +247,7 @@ with
           tables.table_schema = info.table_schema
           and tables.table_name = info.table_name
      ) col_table
-     ORDER BY schema, col_position
+     ORDER BY col_schema, col_position
   ),
 
 
@@ -345,6 +356,8 @@ with
 
   -- Source columns
 
+  -- query explanation at https://gist.github.com/steve-chavez/7ee0e6590cddafb532e5f00c46275569
+
   source_columns as (
        with
        views as (
@@ -360,7 +373,15 @@ with
        removed_subselects as(
          select
            view_schema, view_name,
-           regexp_replace(view_definition, '{subselectRegex}', '', 'g') as x
+           regexp_replace(view_definition,
+             -- "result" appears when the subselect is used inside "case when", see
+             -- `authors_have_book_in_decade` fixture
+             -- "resno"  appears in every other case
+             case when (select pgv_num from pg_version) < 100000
+                then ':subselect {.*?:constraintDeps <>} :location \d+} :res(no|ult)'
+                else ':subselect {.*?:stmt_len 0} :location \d+} :res(no|ult)'
+             end,
+           '', 'g') as x
          from views
        ),
        target_lists as(
@@ -390,27 +411,30 @@ with
          from target_entries
        )
        select
-         sch.nspname as table_schema,
-         tbl.relname as table_name,
-         col.attname as table_column_name,
-         res.view_schema,
-         res.view_name,
-         res.view_colum_name
+         source_column.columns as src_source,
+         view_column.columns as src_view
        from results res
        join pg_class tbl on tbl.oid::text = res.resorigtbl
        join pg_attribute col on col.attrelid = tbl.oid and col.attnum::text = res.resorigcol
-       join pg_namespace sch on sch.oid = tbl.relnamespace
+       join pg_namespace sch on sch.oid = tbl.relnamespace,
+       lateral (
+            select columns
+            from columns
+            where
+                sch.nspname = columns.col_schema
+                and tbl.relname = columns.col_table_name
+                and col.attname = columns.col_name
+       ) source_column,
+       lateral (
+            select columns
+            from columns
+            where
+                res.view_schema = columns.col_schema
+                and res.view_name = columns.col_table_name
+                and res.view_colum_name = columns.col_name
+       ) as view_column
        where resorigtbl <> '0'
        order by view_schema, view_name, view_colum_name
-  ),
-
-
-  -- Postgres version
-
-  pg_version as (
-    SELECT
-      current_setting('server_version_num')::integer as pgv_num,
-      current_setting('server_version') as pgv_name
   )
 
 
@@ -418,14 +442,14 @@ with
 
   select
     json_build_object(
-        'raw_db_procs', procs_agg.array_agg,
-        'raw_db_schema_description', schema_description_agg.array_agg,
-        'raw_db_accessible_tables', accessible_tables_agg.array_agg,
-        'raw_db_tables', tables_agg.array_agg,
+  --      'raw_db_procs', procs_agg.array_agg,
+  --      'raw_db_schema_description', schema_description_agg.array_agg,
+  --      'raw_db_accessible_tables', accessible_tables_agg.array_agg,
+        'raw_db_tables', coalesce(tables_agg.array_agg, array[]::record[]),
         'raw_db_columns', columns_agg.array_agg,
-        'raw_db_m2o_rels', m2o_rels_agg.array_agg,
-        'raw_db_primary_keys', primary_keys_agg.array_agg,
-        'raw_db_source_columns', source_columns_agg.array_agg,
+  --      'raw_db_m2o_rels', m2o_rels_agg.array_agg,
+  --      'raw_db_primary_keys', primary_keys_agg.array_agg,
+        'raw_db_source_columns', coalesce(source_columns_agg.array_agg, array[]::record[]),
         'raw_db_pg_ver', pg_version
     )::json as dbstructure
   from
