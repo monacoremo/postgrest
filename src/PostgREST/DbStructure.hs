@@ -95,6 +95,7 @@ loadProc raw =
           (procReturnType raw)
     , pdVolatility =
         parseVolatility (procVolatility raw)
+    , pdIsAccessible = procIsAccessible raw
     }
 
 addKey :: ProcDescription -> (QualifiedIdentifier, ProcDescription)
@@ -140,6 +141,7 @@ decodeTables =
                  <*> column HD.text
                  <*> nullableColumn HD.text
                  <*> column HD.bool
+                 <*> pure True
 
 decodeProcs :: HD.Result ProcsMap
 decodeProcs =
@@ -157,6 +159,7 @@ decodeProcs =
         <*> column HD.bool
         <*> column HD.char)
         <*> (parseVolatility <$> column HD.char)
+        <*> pure True
 
 accessibleProcs :: H.Statement Schema ProcsMap
 accessibleProcs = H.Statement (toS sql) (param HE.text) decodeProcs True
