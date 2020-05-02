@@ -79,7 +79,7 @@ with
 
   -- Tables
 
-  all_tables as (
+  tables as (
      SELECT
        n.nspname AS table_schema,
        c.relname AS table_name,
@@ -106,20 +106,21 @@ with
 
   -- Columns
 
-  all_columns as (
+  columns as (
      SELECT DISTINCT
+         col_table,
+         info.column_name AS col_name,
          info.table_schema AS schema,
-         info.table_name AS table_name,
-         info.column_name AS name,
-         info.description AS description,
-         info.ordinal_position AS position,
-         info.is_nullable::boolean AS nullable,
+         info.description AS col_description,
+         info.ordinal_position AS col_position,
+         info.is_nullable::boolean AS col_nullable,
          info.data_type AS col_type,
-         info.is_updatable::boolean AS updatable,
-         info.character_maximum_length AS max_len,
-         info.numeric_precision AS precision,
-         info.column_default AS default_value,
-         array_to_string(enum_info.vals, ',') AS enum
+         info.is_updatable::boolean AS col_updatable,
+         info.character_maximum_length AS col_max_len,
+         info.numeric_precision AS col_precision,
+         info.column_default AS col_default,
+         enum_info.vals AS col_enum,
+         null as col_f_k
      FROM (
          -- CTE based on pg_catalog to get PRIMARY/FOREIGN key and UNIQUE columns outside api schema
          WITH key_columns AS (
@@ -228,7 +229,14 @@ with
          JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
          GROUP BY s,n
      ) AS enum_info ON (info.udt_name = enum_info.n)
-     ORDER BY schema, position
+     , lateral (
+        select tables
+        from tables
+        where
+          tables.table_schema = info.table_schema
+          and tables.table_name = info.table_name
+     ) col_table
+     ORDER BY schema, col_position
   ),
 
 
@@ -424,8 +432,8 @@ with
     (select array_agg(procs) from procs) procs_agg,
     (select array_agg(schema_description) from schema_description) schema_description_agg,
     (select array_agg(accessible_tables) from accessible_tables) as accessible_tables_agg,
-    (select array_agg(all_tables) from all_tables) as tables_agg,
-    (select array_agg(all_columns) from all_columns) as columns_agg,
+    (select array_agg(tables) from tables) as tables_agg,
+    (select array_agg(columns) from columns) as columns_agg,
     (select array_agg(m2o_rels) from m2o_rels) as m2o_rels_agg,
     (select array_agg(primary_keys) from primary_keys) as primary_keys_agg,
     (select array_agg(source_columns) from source_columns) as source_columns_agg,

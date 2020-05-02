@@ -23,6 +23,11 @@ module PostgREST.DbStructure (
 , getPgVersion
 ) where
 
+
+
+
+
+
 import           Control.Exception
 import qualified Data.Aeson                    as Aeson
 import qualified Data.FileEmbed                as FileEmbed
