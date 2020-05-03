@@ -13,7 +13,7 @@ with
   -- Procedures
 
   procs as (
-    SELECT
+    select
       pn.nspname as proc_schema,
       p.proname as proc_name,
       d.description as proc_description,
@@ -24,13 +24,14 @@ with
       t.typtype as proc_return_type,
       p.provolatile as proc_volatility,
       has_function_privilege(p.oid, 'execute') as proc_is_accessible
-    FROM pg_proc p
-      JOIN pg_namespace pn ON pn.oid = p.pronamespace
-      JOIN pg_type t ON t.oid = p.prorettype
-      JOIN pg_namespace tn ON tn.oid = t.typnamespace
-      LEFT JOIN pg_class comp ON comp.oid = t.typrelid
-      LEFT JOIN pg_catalog.pg_description as d on d.objoid = p.oid
-    WHERE
+    from
+      pg_proc p
+      join pg_namespace pn on pn.oid = p.pronamespace
+      join pg_type t on t.oid = p.prorettype
+      join pg_namespace tn on tn.oid = t.typnamespace
+      left join pg_class comp on comp.oid = t.typrelid
+      left join pg_description as d on d.objoid = p.oid
+    where
       pn.nspname = any ($1)
   ),
 
@@ -38,14 +39,14 @@ with
   -- Schema description
 
   schemas as (
-      select
-        n.nspname as schema_name,
-        description as schema_description
-      from
-        pg_namespace n
-        left join pg_description d on d.objoid = n.oid
-      where
-        n.nspname = any ($1)
+    select
+      n.nspname as schema_name,
+      description as schema_description
+    from
+      pg_namespace n
+      left join pg_description d on d.objoid = n.oid
+    where
+      n.nspname = any ($1)
   ),
 
 
@@ -53,38 +54,43 @@ with
   -- Tables
 
   tables as (
-     SELECT
-       n.nspname as table_schema,
-       c.relname as table_name,
-       d.description as table_description,
-       (
-         c.relkind in ('r', 'v', 'f')
-         and (pg_relation_is_updatable(c.oid::regclass, false) & 8) = 8
-         -- The function `pg_relation_is_updateable` returns a bitmask where 8
-         -- corresponds to `1 << CMD_INSERT` in the PostgreSQL source code, i.e.
-         -- it's possible to insert into the relation.
-         or exists (
-           select 1
-           from pg_trigger
-           where
-             pg_trigger.tgrelid = c.oid
-             and (pg_trigger.tgtype::integer & 69) = 69
-             -- The trigger type `tgtype` is a bitmask where 69 corresponds to
-             -- TRIGGER_TYPE_ROW + TRIGGER_TYPE_INSTEAD + TRIGGER_TYPE_INSERT
-             -- in the PostgreSQL source code.
-         )
-       ) as table_insertable,
-       (
-         pg_has_role(c.relowner, 'USAGE')
-         or has_table_privilege(c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
-         or has_any_column_privilege(c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
-       ) as table_is_accessible
-     FROM pg_class c
-     JOIN pg_namespace n ON n.oid = c.relnamespace
-     left join pg_catalog.pg_description as d on d.objoid = c.oid and d.objsubid = 0
-     WHERE c.relkind IN ('v','r','m','f')
-       AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-     ORDER BY table_schema, table_name
+    select
+      n.nspname as table_schema,
+      c.relname as table_name,
+      d.description as table_description,
+      (
+        c.relkind in ('r', 'v', 'f')
+        and (pg_relation_is_updatable(c.oid::regclass, false) & 8) = 8
+        -- The function `pg_relation_is_updateable` returns a bitmask where 8
+        -- corresponds to `1 << CMD_INSERT` in the PostgreSQL source code, i.e.
+        -- it's possible to insert into the relation.
+        or exists (
+          select 1
+          from pg_trigger
+          where
+            pg_trigger.tgrelid = c.oid
+            and (pg_trigger.tgtype::integer & 69) = 69
+            -- The trigger type `tgtype` is a bitmask where 69 corresponds to
+            -- TRIGGER_TYPE_ROW + TRIGGER_TYPE_INSTEAD + TRIGGER_TYPE_INSERT
+            -- in the PostgreSQL source code.
+        )
+      ) as table_insertable,
+      (
+        pg_has_role(c.relowner, 'USAGE')
+        or has_table_privilege(c.oid, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER')
+        or has_any_column_privilege(c.oid, 'SELECT, INSERT, UPDATE, REFERENCES')
+      ) as table_is_accessible
+    from
+      pg_class c
+      join pg_namespace n
+        on n.oid = c.relnamespace
+      left join pg_catalog.pg_description as d
+        on d.objoid = c.oid and d.objsubid = 0
+    where
+      c.relkind IN ('v','r','m','f')
+      and n.nspname NOT IN ('pg_catalog', 'information_schema')
+    order by
+      table_schema, table_name
   ),
 
 
@@ -233,90 +239,91 @@ with
   -- M2O relations
 
   m2o_rels as (
-     SELECT
+     select
         rel_table,
         rel_columns.array_agg as rel_columns,
         conname as rel_constraint,
         rel_f_table,
         rel_f_columns.array_agg as rel_f_columns,
-        'M2O' as rel_type,
-        null as rel_junction
-     FROM pg_constraint,
-     LATERAL (
-       SELECT array_agg(cols.attname) AS cols,
-                     array_agg(cols.attnum)  AS nums,
-                     array_agg(refs.attname) AS refs
-       FROM (
-          SELECT unnest(conkey) AS col, unnest(confkey) AS ref) k,
-       LATERAL (SELECT * FROM pg_attribute WHERE attrelid = conrelid AND attnum = col) AS cols,
-       LATERAL (SELECT * FROM pg_attribute WHERE attrelid = confrelid AND attnum = ref) AS refs) AS column_info,
-     LATERAL (SELECT * FROM pg_namespace WHERE pg_namespace.oid = connamespace) AS ns1,
-     LATERAL (SELECT * FROM pg_class WHERE pg_class.oid = conrelid) AS tab,
-     LATERAL (SELECT * FROM pg_class WHERE pg_class.oid = confrelid) AS other,
-     LATERAL (SELECT * FROM pg_namespace WHERE pg_namespace.oid = other.relnamespace) AS ns2
-         , lateral (
-            select * from tables
-            where
-              tables.table_schema::text = ns1.nspname::text
-              and tables.table_name::text = tab.relname::text
-         ) rel_table
-         , lateral (
-            select * from tables
-            where
-              tables.table_schema::text = ns2.nspname::text
-              and tables.table_name::text = other.relname::text
-         ) rel_f_table
-         , lateral (
-            select array_agg(columns) from columns
-            where
-              col_schema = ns1.nspname
-              and col_table_name = tab.relname
-              and col_name = any (column_info.cols)
-         ) rel_columns
-         , lateral (
-            select array_agg(columns) from columns
-            where
-              col_schema = ns2.nspname
-              and col_table_name = other.relname
-              and col_name = any (column_info.refs)
-         ) rel_f_columns
+        'M2O' as rel_type
+     from
+       pg_constraint
+       join pg_namespace ns1 on ns1.oid = connamespace
+       join pg_class tab on tab.oid = conrelid
+       join pg_class other on other.oid = confrelid
+       join pg_namespace ns2 on ns2.oid = other.relnamespace
+       join tables rel_table
+         on
+            rel_table.table_schema = ns1.nspname
+            and rel_table.table_name = tab.relname
+       join tables rel_f_table
+         on
+            rel_f_table.table_schema = ns2.nspname
+            and rel_f_table.table_name = other.relname
+       , lateral (
+         select
+           array_agg(cols.attname) AS cols,
+           array_agg(cols.attnum)  AS nums,
+           array_agg(refs.attname) AS refs
+         FROM
+          (select
+             unnest(conkey) AS col,
+             unnest(confkey) AS ref
+          ) k
+          join pg_attribute cols on cols.attrelid = conrelid and cols.attnum = col
+          join pg_attribute refs on refs.attrelid = confrelid and refs.attnum = ref
+       ) AS column_info
+       , lateral (
+          select array_agg(columns) from columns
+          where
+            col_schema = ns1.nspname
+            and col_table_name = tab.relname
+            and col_name = any (column_info.cols)
+       ) rel_columns
+       , lateral (
+          select array_agg(columns) from columns
+          where
+            col_schema = ns2.nspname
+            and col_table_name = other.relname
+            and col_name = any (column_info.refs)
+       ) rel_f_columns
      WHERE confrelid != 0
-     ORDER BY (conrelid, column_info.nums)
+     ORDER BY conrelid, column_info.nums
   ),
 
 
   -- Primary keys
 
   primary_keys as (
-     -- CTE to replace information_schema.table_constraints to remove owner limit
      WITH tc AS (
          SELECT
-             c.conname::name AS constraint_name,
-             nr.nspname::name AS table_schema,
-             r.relname::name AS table_name
+             c.conname AS constraint_name,
+             nr.nspname AS table_schema,
+             r.relname AS table_name
          FROM pg_namespace nc,
              pg_namespace nr,
              pg_constraint c,
              pg_class r
          WHERE
-             nc.oid = c.connamespace
+             nr.nspname NOT IN ('pg_catalog', 'information_schema')
+             and nc.oid = c.connamespace
              AND nr.oid = r.relnamespace
              AND c.conrelid = r.oid
              AND r.relkind = 'r'
              AND NOT pg_is_other_temp_schema(nr.oid)
              AND c.contype = 'p'
      ),
-     -- CTE to replace information_schema.key_column_usage to remove owner limit
      kc AS (
          SELECT
-             ss.conname::name AS constraint_name,
-             ss.nr_nspname::name AS table_schema,
-             ss.relname::name AS table_name,
-             a.attname::name AS column_name,
-             (ss.x).n::integer AS ordinal_position,
+             ss.conname AS constraint_name,
+             ss.nr_nspname AS table_schema,
+             ss.relname AS table_name,
+             a.attname AS column_name,
+             (ss.x).n AS ordinal_position,
              CASE
-                 WHEN ss.contype = 'f' THEN information_schema._pg_index_position(ss.conindid, ss.confkey[(ss.x).n])
-                 ELSE NULL::integer
+                 WHEN ss.contype = 'f'
+                 THEN information_schema._pg_index_position(ss.conindid, ss.confkey[(ss.x).n])
+                 ELSE null
              END::integer AS position_in_unique_constraint
          FROM pg_attribute a,
              ( SELECT r.oid AS roid,
@@ -335,7 +342,7 @@ with
                  pg_namespace nc,
                  pg_constraint c
                WHERE
-               nr.oid = r.relnamespace
+                 nr.oid = r.relnamespace
                  AND r.oid = c.conrelid
                  AND nc.oid = c.connamespace
                  AND c.contype in ('p', 'u', 'f')
@@ -347,25 +354,22 @@ with
            AND a.attnum = (ss.x).x
            AND NOT a.attisdropped
      )
-     SELECT
+     select
          kc.table_schema,
          kc.table_name,
          kc.column_name as pk_name,
          pk_table
-     FROM
-         tc, kc
-         , lateral (
-            select *
-            from tables
-            where
-              tables.table_schema::text = kc.table_schema::text
-              and tables.table_name::text = kc.table_name::text
-         ) pk_table
-     WHERE
-         kc.table_name = tc.table_name AND
-         kc.table_schema = tc.table_schema AND
-         kc.constraint_name = tc.constraint_name AND
-         kc.table_schema NOT IN ('pg_catalog', 'information_schema')
+     from
+         tc
+         join kc
+           on
+             kc.table_name = tc.table_name
+             and kc.table_schema = tc.table_schema
+             and kc.constraint_name = tc.constraint_name
+         join tables pk_table
+           on
+              pk_table.table_schema::text = kc.table_schema::text
+              and pk_table.table_name::text = kc.table_name::text
   ),
 
 
@@ -374,88 +378,77 @@ with
   -- query explanation at https://gist.github.com/steve-chavez/7ee0e6590cddafb532e5f00c46275569
 
   source_columns as (
-       with
-       views as (
-         select
-           n.nspname   as view_schema,
-           c.relname   as view_name,
-           r.ev_action as view_definition
-         from pg_class c
-         join pg_namespace n on n.oid = c.relnamespace
-         join pg_rewrite r on r.ev_class = c.oid
-         where c.relkind in ('v', 'm') and n.nspname = ANY ($1)
-       ),
-       removed_subselects as(
-         select
-           view_schema, view_name,
-           regexp_replace(view_definition,
-             -- "result" appears when the subselect is used inside "case when", see
-             -- `authors_have_book_in_decade` fixture
-             -- "resno"  appears in every other case
-             case when (select pgv_num from pg_version) < 100000
-                then ':subselect {.*?:constraintDeps <>} :location \d+} :res(no|ult)'
-                else ':subselect {.*?:stmt_len 0} :location \d+} :res(no|ult)'
-             end,
-           '', 'g') as x
-         from views
-       ),
-       target_lists as(
-         select
-           view_schema, view_name,
-           regexp_split_to_array(x, 'targetList') as x
-         from removed_subselects
-       ),
-       last_target_list_wo_tail as(
-         select
-           view_schema, view_name,
-           (regexp_split_to_array(x[array_upper(x, 1)], ':onConflict'))[1] as x
-         from target_lists
-       ),
-       target_entries as(
-         select
-           view_schema, view_name,
-           unnest(regexp_split_to_array(x, 'TARGETENTRY')) as entry
-         from last_target_list_wo_tail
-       ),
-       results as(
-         select
-           view_schema, view_name,
-           substring(entry from ':resname (.*?) :') as view_colum_name,
-           substring(entry from ':resorigtbl (.*?) :') as resorigtbl,
-           substring(entry from ':resorigcol (.*?) :') as resorigcol
-         from target_entries
-       )
-       select
-         sch.nspname as table_schema,
-         tbl.relname as table_name,
-         col.attname as table_column_name,
-         res.view_schema,
-         res.view_name,
-         res.view_colum_name,
-         source_column.c1 as src_source,
-         view_column.c2 as src_view
-       from results res
-       join pg_class tbl on tbl.oid::text = res.resorigtbl
-       join pg_attribute col on col.attrelid = tbl.oid and col.attnum::text = res.resorigcol
-       join pg_namespace sch on sch.oid = tbl.relnamespace,
-       lateral (
-            select c1
-            from columns c1
-            where
-                sch.nspname = c1.col_schema
-                and tbl.relname = c1.col_table_name
-                and col.attname = c1.col_name
-       ) source_column,
-       lateral (
-            select c2
-            from columns c2
-            where
-                res.view_schema = c2.col_schema
-                and res.view_name = c2.col_table_name
-                and res.view_colum_name = c2.col_name
-       ) as view_column
-       where resorigtbl <> '0'
-       order by view_schema, view_name, view_colum_name
+    with
+      entries as (
+        select
+          n.nspname as view_schema,
+          c.relname as view_name,
+          r.ev_action as view_definition,
+          last_target_list_wo_tail::text as x,
+          substring(entry from ':resname (.*?) :') as view_colum_name,
+          substring(entry from ':resorigtbl (.*?) :') as resorigtbl,
+          substring(entry from ':resorigcol (.*?) :') as resorigcol
+        from
+          pg_class c
+          join pg_namespace n on n.oid = c.relnamespace
+          join pg_rewrite r on r.ev_class = c.oid
+          , regexp_replace(
+              r.ev_action,
+              -- "result" appears when the subselect is used inside "case when", see
+              -- `authors_have_book_in_decade` fixture
+              -- "resno"  appears in every other case
+              case when (select pgv_num from pg_version) < 100000
+                 then ':subselect {.*?:constraintDeps <>} :location \d+} :res(no|ult)'
+                 else ':subselect {.*?:stmt_len 0} :location \d+} :res(no|ult)'
+              end,
+              '',
+              'g'
+            ) as x
+          , regexp_split_to_array(x, 'targetList') as target_lists
+          , lateral (
+              select
+                (regexp_split_to_array(
+                  target_lists[array_upper(target_lists, 1)], ':onConflict'
+                ))[1]
+            ) last_target_list_wo_tail
+          , unnest(regexp_split_to_array(last_target_list_wo_tail::text, 'TARGETENTRY')) as entry
+        where
+          c.relkind in ('v', 'm')
+          and n.nspname = ANY ($1)
+      )
+      select
+        sch.nspname as table_schema,
+        tbl.relname as table_name,
+        col.attname as table_column_name,
+        res.view_schema,
+        res.view_name,
+        res.view_colum_name,
+        source_column as src_source,
+        view_column as src_view
+      from
+        entries res
+        join pg_class tbl
+          on tbl.oid::text = res.resorigtbl
+        join pg_attribute col
+          on
+            col.attrelid = tbl.oid
+            and col.attnum::text = res.resorigcol
+        join pg_namespace sch
+          on sch.oid = tbl.relnamespace
+        join columns source_column
+          on
+            sch.nspname = source_column.col_schema
+            and tbl.relname = source_column.col_table_name
+            and col.attname = source_column.col_name
+        join columns view_column
+          on
+            res.view_schema = view_column.col_schema
+            and res.view_name = view_column.col_table_name
+            and res.view_colum_name = view_column.col_name
+        where
+          resorigtbl <> '0'
+        order by
+          view_schema, view_name, view_colum_name
   )
 
 
@@ -463,15 +456,15 @@ with
 
   select
     json_build_object(
-        'raw_db_procs', coalesce(procs_agg.array_agg, array[]::record[]),
-        'raw_db_schemas', coalesce(schemas_agg.array_agg, array[]::record[]),
-        'raw_db_tables', coalesce(tables_agg.array_agg, array[]::record[]),
-        'raw_db_columns', coalesce(columns_agg.array_agg, array[]::record[]),
-        'raw_db_m2o_rels', coalesce(m2o_rels_agg.array_agg, array[]::record[]),
-        'raw_db_primary_keys', coalesce(primary_keys_agg.array_agg, array[]::record[]),
-        'raw_db_source_columns', coalesce(source_columns_agg.array_agg, array[]::record[]),
-        'raw_db_pg_ver', pg_version
-    )::json as dbstructure
+      'raw_db_procs', coalesce(procs_agg.array_agg, array[]::record[]),
+      'raw_db_schemas', coalesce(schemas_agg.array_agg, array[]::record[]),
+      'raw_db_tables', coalesce(tables_agg.array_agg, array[]::record[]),
+      'raw_db_columns', coalesce(columns_agg.array_agg, array[]::record[]),
+      'raw_db_m2o_rels', coalesce(m2o_rels_agg.array_agg, array[]::record[]),
+      'raw_db_primary_keys', coalesce(primary_keys_agg.array_agg, array[]::record[]),
+      'raw_db_source_columns', coalesce(source_columns_agg.array_agg, array[]::record[]),
+      'raw_db_pg_ver', pg_version
+    ) as dbstructure
   from
     (select array_agg(procs) from procs) procs_agg,
     (select array_agg(schemas) from schemas) schemas_agg,
