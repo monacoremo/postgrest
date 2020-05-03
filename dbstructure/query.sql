@@ -10,6 +10,21 @@ with
   ),
 
 
+  -- Schema descriptions
+
+  schemas as (
+    select
+      n.oid,
+      n.nspname as schema_name,
+      description as schema_description
+    from
+      pg_namespace n
+      left join pg_description d on d.objoid = n.oid
+    where
+      n.nspname = any ($1)
+  ),
+
+
   -- Procedures
 
   procs as (
@@ -33,20 +48,6 @@ with
       left join pg_description as d on d.objoid = p.oid
     where
       pn.nspname = any ($1)
-  ),
-
-
-  -- Schema description
-
-  schemas as (
-    select
-      n.nspname as schema_name,
-      description as schema_description
-    from
-      pg_namespace n
-      left join pg_description d on d.objoid = n.oid
-    where
-      n.nspname = any ($1)
   ),
 
 
@@ -98,85 +99,82 @@ with
   -- Columns
 
   columns as (
-     with key_columns as (
-          select
-            c.oid,
-            r.conkey
+    select distinct
+      col_table,
+      a.attrelid as col_table_oid,
+      nc.nspname as col_schema,
+      c.relname as col_table_name,
+      a.attname as col_name,
+      d.description as col_description,
+      a.attnum as col_position,
+      pg_get_expr(ad.adbin, ad.adrelid)::text as col_default,
+      not (a.attnotnull or t.typtype = 'd' and t.typnotnull) as col_nullable,
+      case
+        when t.typtype = 'd' then
+          case
+            when bt.typelem <> 0::oid and bt.typlen = (-1) then
+              'ARRAY'::text
+            when nbt.nspname = 'pg_catalog'::name then
+              format_type(t.typbasetype, null::integer)
+            else
+              format_type(a.atttypid, a.atttypmod)
+          end
+        else
+          case
+            when t.typelem <> 0::oid and t.typlen = (-1) then
+              'ARRAY'
+            when nt.nspname = 'pg_catalog'::name then
+              format_type(a.atttypid, null::integer)
+            else
+              format_type(a.atttypid, a.atttypmod)
+          end
+      end as col_type,
+      information_schema._pg_char_max_length(truetypid, truetypmod) as col_max_len,
+      information_schema._pg_numeric_precision(truetypid, truetypmod) as col_precision,
+      (
+        c.relkind in ('r', 'v', 'f')
+        and pg_column_is_updatable(c.oid::regclass, a.attnum, false)
+      ) col_updatable,
+      coalesce(enum_info.vals, array[]::text[]) as col_enum
+    from
+      pg_attribute a
+      left join pg_description d on d.objoid = a.attrelid and d.objsubid = a.attnum
+      left join pg_attrdef ad on a.attrelid = ad.adrelid and a.attnum = ad.adnum
+      join pg_class c on a.attrelid = c.oid
+      join pg_namespace nc on c.relnamespace = nc.oid
+      join pg_type t on a.atttypid = t.oid
+      join pg_namespace nt on t.typnamespace = nt.oid
+      left join pg_type bt on t.typtype = 'd' and t.typbasetype = bt.oid
+      left join pg_namespace nbt on bt.typnamespace = nbt.oid
+      join tables col_table on col_table.oid = a.attrelid
+      , lateral (
+          select array_agg(e.enumlabel order by e.enumsortorder) as vals
           from
-            pg_constraint r
-            join pg_class c on r.conrelid = c.oid
-            join pg_namespace n on c.relnamespace = n.oid
+            pg_type et
+            join pg_enum e on et.oid = e.enumtypid
           where
-            r.contype in ('f', 'p', 'u')
-            and c.relkind in ('r', 'v', 'f', 'm')
-            and n.nspname <> any (array['pg_catalog', 'information_schema'] || $1)
-     )
-     select distinct
-         col_table,
-         a.attrelid as col_table_oid,
-         nc.nspname as col_schema,
-         c.relname as col_table_name,
-         a.attname as col_name,
-         d.description as col_description,
-         a.attnum as col_position,
-         pg_get_expr(ad.adbin, ad.adrelid)::text as col_default,
-         not (a.attnotnull or t.typtype = 'd' and t.typnotnull) as col_nullable,
-             case
-                 when t.typtype = 'd' then
-                 case
-                     when bt.typelem <> 0::oid and bt.typlen = (-1) then 'array'::text
-                     when nbt.nspname = 'pg_catalog'::name then format_type(t.typbasetype, null::integer)
-                     else format_type(a.atttypid, a.atttypmod)
-                 end
-                 else
-                 case
-                     when t.typelem <> 0::oid and t.typlen = (-1) then 'array'::text
-                     when nt.nspname = 'pg_catalog'::name then format_type(a.atttypid, null::integer)
-                     else format_type(a.atttypid, a.atttypmod)
-                 end
-             end as col_type,
-         information_schema._pg_char_max_length(truetypid, truetypmod) as col_max_len,
-         information_schema._pg_numeric_precision(truetypid, truetypmod) as col_precision,
-         (
-             c.relkind in ('r', 'v', 'f')
-             and pg_column_is_updatable(c.oid::regclass, a.attnum, false)
-         ) col_updatable,
-         coalesce(enum_info.vals, array[]::text[]) as col_enum
-     from pg_attribute a
-         left join pg_catalog.pg_description d
-           on d.objoid = a.attrelid and d.objsubid = a.attnum
-         left join pg_attrdef ad
-           on a.attrelid = ad.adrelid and a.attnum = ad.adnum
-         join pg_class c
-           on a.attrelid = c.oid
-         join pg_namespace nc
-           on c.relnamespace = nc.oid
-         join pg_type t
-           on a.atttypid = t.oid
-         join pg_namespace nt
-           on t.typnamespace = nt.oid
-         left join pg_type bt
-           on t.typtype = 'd' and t.typbasetype = bt.oid
-         left join pg_namespace nbt
-           on bt.typnamespace = nbt.oid
-         join tables col_table on col_table.oid = a.attrelid
-         , lateral (
-             select array_agg(e.enumlabel order by e.enumsortorder) as vals
-             from pg_type et
-             join pg_enum e on et.oid = e.enumtypid
-            where et.oid = t.oid
-         ) as enum_info
-         , information_schema._pg_truetypid(a.*, t.*) truetypid
-         , information_schema._pg_truetypmod(a.*, t.*) truetypmod
-     where
-         not pg_is_other_temp_schema(nc.oid)
-         and a.attnum > 0
-         and not a.attisdropped
-         and c.relkind in ('r', 'v', 'f', 'm')
-         and (
-            nc.nspname = any ($1)
-            or exists(select 1 from key_columns kc where kc.oid = a.attrelid and a.attnum = any(kc.conkey))
-         )
+            et.oid = t.oid
+      ) as enum_info
+      , information_schema._pg_truetypid(a.*, t.*) truetypid
+      , information_schema._pg_truetypmod(a.*, t.*) truetypmod
+    where
+      not pg_is_other_temp_schema(nc.oid)
+      and a.attnum > 0
+      and not a.attisdropped
+      and c.relkind in ('r', 'v', 'f', 'm')
+      and (
+        nc.nspname = any ($1)
+        or exists(
+            select 1
+            from
+              pg_constraint r
+            where
+              -- can we keep only ones that point to our schema?
+              r.conrelid = a.attrelid
+              and a.attnum = any(r.conkey)
+              and r.contype in ('f', 'p', 'u')
+        )
+      )
      order by col_schema, col_position
   ),
 
@@ -215,81 +213,86 @@ with
   -- Primary keys
 
   primary_keys as (
-     WITH tc AS (
-         SELECT
-             c.conname AS constraint_name,
-             nr.nspname AS table_schema,
-             r.relname AS table_name
-         FROM pg_namespace nc,
-             pg_namespace nr,
-             pg_constraint c,
-             pg_class r
-         WHERE
-             nr.nspname NOT IN ('pg_catalog', 'information_schema')
-             and nc.oid = c.connamespace
-             AND nr.oid = r.relnamespace
-             AND c.conrelid = r.oid
-             AND r.relkind = 'r'
-             AND NOT pg_is_other_temp_schema(nr.oid)
-             AND c.contype = 'p'
-     ),
-     kc AS (
-         SELECT
-             ss.conname AS constraint_name,
-             ss.nr_nspname AS table_schema,
-             ss.relname AS table_name,
-             a.attname AS column_name,
-             (ss.x).n AS ordinal_position,
-             CASE
-                 WHEN ss.contype = 'f'
-                 THEN information_schema._pg_index_position(ss.conindid, ss.confkey[(ss.x).n])
-                 ELSE null
-             END::integer AS position_in_unique_constraint
-         FROM pg_attribute a,
-             ( SELECT r.oid AS roid,
-                 r.relname,
-                 r.relowner,
-                 nc.nspname AS nc_nspname,
-                 nr.nspname AS nr_nspname,
-                 c.oid AS coid,
-                 c.conname,
-                 c.contype,
-                 c.conindid,
-                 c.confkey,
-                 information_schema._pg_expandarray(c.conkey) AS x
-                FROM pg_namespace nr,
-                 pg_class r,
-                 pg_namespace nc,
-                 pg_constraint c
-               WHERE
-                 nr.oid = r.relnamespace
-                 AND r.oid = c.conrelid
-                 AND nc.oid = c.connamespace
-                 AND c.contype in ('p', 'u', 'f')
-                 AND r.relkind = 'r'
-                 AND NOT pg_is_other_temp_schema(nr.oid)
-             ) ss
-         WHERE
-           ss.roid = a.attrelid
-           AND a.attnum = (ss.x).x
-           AND NOT a.attisdropped
-     )
-     select
-         kc.table_schema,
-         kc.table_name,
-         kc.column_name as pk_name,
-         pk_table
-     from
-         tc
-         join kc
-           on
-             kc.table_name = tc.table_name
-             and kc.table_schema = tc.table_schema
-             and kc.constraint_name = tc.constraint_name
-         join tables pk_table
-           on
-              pk_table.table_schema::text = kc.table_schema::text
-              and pk_table.table_name::text = kc.table_name::text
+    with tc as (
+      select
+        c.conname as constraint_name,
+        nr.nspname as table_schema,
+        r.relname as table_name
+      from pg_namespace nc,
+        pg_namespace nr,
+        pg_constraint c,
+        pg_class r
+      where
+        nr.nspname not in ('pg_catalog', 'information_schema')
+        and nc.oid = c.connamespace
+        and nr.oid = r.relnamespace
+        and c.conrelid = r.oid
+        and r.relkind = 'r'
+        and not pg_is_other_temp_schema(nr.oid)
+        and c.contype = 'p'
+    ),
+    kc as (
+      select
+        ss.conname as constraint_name,
+        ss.nr_nspname as table_schema,
+        ss.relname as table_name,
+        a.attname as column_name,
+        (ss.x).n as ordinal_position,
+        case
+          when ss.contype = 'f' then
+            information_schema._pg_index_position(ss.conindid, ss.confkey[(ss.x).n])
+          else
+            null
+        end::integer as position_in_unique_constraint
+      from
+        pg_attribute a,
+        (
+          select
+            r.oid as roid,
+            r.relname,
+            r.relowner,
+            nc.nspname as nc_nspname,
+            nr.nspname as nr_nspname,
+            c.oid as coid,
+            c.conname,
+            c.contype,
+            c.conindid,
+            c.confkey,
+            information_schema._pg_expandarray(c.conkey) as x
+          from
+            pg_namespace nr,
+            pg_class r,
+            pg_namespace nc,
+            pg_constraint c
+          where
+            nr.oid = r.relnamespace
+            and r.oid = c.conrelid
+            and nc.oid = c.connamespace
+            and c.contype in ('p', 'u', 'f')
+            and r.relkind = 'r'
+            and not pg_is_other_temp_schema(nr.oid)
+        ) ss
+      where
+        ss.roid = a.attrelid
+        and a.attnum = (ss.x).x
+        and not a.attisdropped
+    )
+    select
+      kc.table_schema,
+      kc.table_name,
+      kc.column_name as pk_name,
+      pk_table
+    from
+      tc
+      join kc
+        on
+          kc.table_name = tc.table_name
+          and kc.table_schema = tc.table_schema
+          and kc.constraint_name = tc.constraint_name
+      join tables pk_table
+        on
+          pk_table.table_schema = kc.table_schema
+          and pk_table.table_name = kc.table_name
   ),
 
 

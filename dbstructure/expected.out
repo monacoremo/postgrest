@@ -6761,7 +6761,7 @@ DbStructure
             , colDescription = Nothing
             , colPosition = 3
             , colNullable = True
-            , colType = "array"
+            , colType = "ARRAY"
             , colUpdatable = True
             , colMaxLen = Nothing
             , colPrecision = Nothing
@@ -7954,7 +7954,7 @@ DbStructure
             , colDescription = Nothing
             , colPosition = 4
             , colNullable = True
-            , colType = "array"
+            , colType = "ARRAY"
             , colUpdatable = True
             , colMaxLen = Nothing
             , colPrecision = Nothing
