@@ -245,8 +245,8 @@ with
   m2o_rels as (
      select
         conname as rel_constraint,
-        (select tables from tables where tables.oid = conrelid) as rel_table,
-        (select tables from tables where tables.oid = confrelid) as rel_f_table,
+        rel_table,
+        rel_f_table,
         array(
           select columns
           from columns
@@ -262,7 +262,10 @@ with
             and col_position = any (confkey)
         ) as rel_f_columns,
         'M2O' as rel_type
-     from pg_constraint
+     from
+       pg_constraint
+       join tables rel_table on rel_table.oid = conrelid
+       join tables rel_f_table on rel_f_table.oid = confrelid
      where confrelid != 0
      order by conrelid, conkey
   ),
