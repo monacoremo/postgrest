@@ -130,15 +130,16 @@ executable postgrest
     build-depends: unix
     other-modules: UnixSocket
 
-executable dbstructure
+executable postgrest-dbstructure
   main-is:            Main.hs
   hs-source-dirs:     dbstructure
-  build-depends:      base              >= 4.9 && < 4.15
-                    , aeson             >= 1.4.7 && < 1.5
-                    , bytestring        >= 0.10.8 && < 0.11
+  build-depends:      base                 >= 4.9 && < 4.15
+                    , aeson                >= 1.4.7 && < 1.5
+                    , bytestring           >= 0.10.8 && < 0.11
                     , postgrest
-                    , protolude         >= 0.3 && < 0.4
-                    , pretty-simple     >= 3.2.2.0 && < 3.3
+                    , protolude            >= 0.3 && < 0.4
+                    , pretty-simple        >= 3.2.2.0 && < 3.3
+                    , optparse-applicative >= 0.15.1.0 && < 0.16
   default-language:   Haskell2010
   default-extensions: OverloadedStrings
                       NoImplicitPrelude
