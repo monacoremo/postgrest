@@ -98,86 +98,107 @@ with
   -- Columns
 
   columns as (
-     with key_columns as (
-          select
-            c.oid,
-            r.conkey
-          from
-            pg_constraint r
-            join pg_class c on r.conrelid = c.oid
-            join pg_namespace n on c.relnamespace = n.oid
-          where
-            r.contype in ('f', 'p', 'u')
-            and c.relkind in ('r', 'v', 'f', 'm')
-            and n.nspname <> any (array['pg_catalog', 'information_schema'] || $1)
+     WITH key_columns AS (
+          SELECT
+            r.oid AS r_oid,
+            c.oid AS c_oid,
+            n.nspname,
+            c.relname,
+            r.conname,
+            r.contype,
+            unnest(r.conkey) AS conkey
+          FROM
+            pg_catalog.pg_constraint r,
+            pg_catalog.pg_class c,
+            pg_catalog.pg_namespace n
+          WHERE
+            r.contype IN ('f', 'p', 'u')
+            AND c.relkind IN ('r', 'v', 'f', 'm')
+            AND r.conrelid = c.oid
+            AND c.relnamespace = n.oid
+            AND n.nspname <> ANY (ARRAY['pg_catalog', 'information_schema'] || $1)
      )
-     select distinct
+     SELECT DISTINCT
          col_table,
          a.attrelid as col_table_oid,
-         nc.nspname as col_schema,
-         c.relname as col_table_name,
-         a.attname as col_name,
-         d.description as col_description,
-         a.attnum as col_position,
-         pg_get_expr(ad.adbin, ad.adrelid)::text as col_default,
-         not (a.attnotnull or t.typtype = 'd' and t.typnotnull) as col_nullable,
-             case
-                 when t.typtype = 'd' then
-                 case
-                     when bt.typelem <> 0::oid and bt.typlen = (-1) then 'array'::text
-                     when nbt.nspname = 'pg_catalog'::name then format_type(t.typbasetype, null::integer)
-                     else format_type(a.atttypid, a.atttypmod)
-                 end
-                 else
-                 case
-                     when t.typelem <> 0::oid and t.typlen = (-1) then 'array'::text
-                     when nt.nspname = 'pg_catalog'::name then format_type(a.atttypid, null::integer)
-                     else format_type(a.atttypid, a.atttypmod)
-                 end
-             end as col_type,
-         information_schema._pg_char_max_length(truetypid, truetypmod) as col_max_len,
-         information_schema._pg_numeric_precision(truetypid, truetypmod) as col_precision,
+         nc.nspname AS col_schema,
+         c.relname AS col_table_name,
+         a.attname AS col_name,
+         d.description AS col_description,
+         a.attnum AS col_position,
+         pg_get_expr(ad.adbin, ad.adrelid)::text AS col_default,
+         not (a.attnotnull OR t.typtype = 'd' AND t.typnotnull) AS col_nullable,
+             CASE
+                 WHEN t.typtype = 'd' THEN
+                 CASE
+                     WHEN bt.typelem <> 0::oid AND bt.typlen = (-1) THEN 'ARRAY'::text
+                     WHEN nbt.nspname = 'pg_catalog'::name THEN format_type(t.typbasetype, NULL::integer)
+                     ELSE format_type(a.atttypid, a.atttypmod)
+                 END
+                 ELSE
+                 CASE
+                     WHEN t.typelem <> 0::oid AND t.typlen = (-1) THEN 'ARRAY'::text
+                     WHEN nt.nspname = 'pg_catalog'::name THEN format_type(a.atttypid, NULL::integer)
+                     ELSE format_type(a.atttypid, a.atttypmod)
+                 END
+             END AS col_type,
+         information_schema._pg_char_max_length(truetypid, truetypmod) AS col_max_len,
+         information_schema._pg_numeric_precision(truetypid, truetypmod) AS col_precision,
          (
              c.relkind in ('r', 'v', 'f')
-             and pg_column_is_updatable(c.oid::regclass, a.attnum, false)
+             AND pg_column_is_updatable(c.oid::regclass, a.attnum, false)
          ) col_updatable,
-         coalesce(enum_info.vals, array[]::text[]) as col_enum
-     from pg_attribute a
-         left join pg_catalog.pg_description d
-           on d.objoid = a.attrelid and d.objsubid = a.attnum
-         left join pg_attrdef ad
-           on a.attrelid = ad.adrelid and a.attnum = ad.adnum
-         join pg_class c
-           on a.attrelid = c.oid
-         join pg_namespace nc
-           on c.relnamespace = nc.oid
-         join pg_type t
-           on a.atttypid = t.oid
-         join pg_namespace nt
-           on t.typnamespace = nt.oid
-         left join pg_type bt
-           on t.typtype = 'd' and t.typbasetype = bt.oid
-         left join pg_namespace nbt
-           on bt.typnamespace = nbt.oid
-         join tables col_table on col_table.oid = a.attrelid
+         coalesce(enum_info.vals, array[]::text[]) AS col_enum
+     FROM pg_attribute a
+         LEFT JOIN key_columns kc
+             ON kc.conkey = a.attnum AND kc.c_oid = a.attrelid
+         LEFT JOIN pg_catalog.pg_description AS d
+             ON d.objoid = a.attrelid and d.objsubid = a.attnum
+         LEFT JOIN pg_attrdef ad
+             ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+         JOIN (pg_class c JOIN pg_namespace nc ON c.relnamespace = nc.oid)
+             ON a.attrelid = c.oid
+         JOIN (pg_type t JOIN pg_namespace nt ON t.typnamespace = nt.oid)
+             ON a.atttypid = t.oid
+         LEFT JOIN (pg_type bt JOIN pg_namespace nbt ON bt.typnamespace = nbt.oid)
+             ON t.typtype = 'd' AND t.typbasetype = bt.oid
+         LEFT JOIN (pg_collation co JOIN pg_namespace nco ON co.collnamespace = nco.oid)
+             ON a.attcollation = co.oid AND (nco.nspname <> 'pg_catalog'::name OR co.collname <> 'default'::name)
+         LEFT OUTER JOIN (
+             SELECT
+                 n.nspname AS s,
+                 t.typname AS n,
+                 array_agg(e.enumlabel ORDER BY e.enumsortorder) AS vals
+             FROM pg_type t
+             JOIN pg_enum e ON t.oid = e.enumtypid
+             JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+             GROUP BY s,n
+         ) AS enum_info ON enum_info.n = coalesce(bt.typname, t.typname)
          , lateral (
-             select array_agg(e.enumlabel order by e.enumsortorder) as vals
-             from pg_type et
-             join pg_enum e on et.oid = e.enumtypid
-            where et.oid = t.oid
-         ) as enum_info
+            select
+              -- explicit columns needed for Postgres < 10
+              table_schema::text,
+              table_name::text,
+              table_description::text,
+              table_insertable::bool,
+              table_is_accessible::bool
+            from tables
+            where
+              tables.table_schema::text = table_schema::text
+              and tables.table_name::text = table_name::text
+         ) col_table
          , information_schema._pg_truetypid(a.*, t.*) truetypid
          , information_schema._pg_truetypmod(a.*, t.*) truetypmod
-     where
-         not pg_is_other_temp_schema(nc.oid)
-         and a.attnum > 0
-         and not a.attisdropped
-         and c.relkind in ('r', 'v', 'f', 'm')
-         and (
-            nc.nspname = any ($1)
-            or exists(select 1 from key_columns kc where kc.oid = a.attrelid and a.attnum = any(kc.conkey))
-         )
-     order by col_schema, col_position
+     WHERE
+         NOT pg_is_other_temp_schema(nc.oid)
+         AND a.attnum > 0
+         AND NOT a.attisdropped
+         AND c.relkind in ('r', 'v', 'f', 'm')
+         -- Filter only columns that are FK/PK or in the api schema:
+         AND nc.nspname = ANY ($1)
+         OR kc.r_oid IS NOT NULL
+         AND nc.nspname NOT IN ('pg_catalog', 'information_schema')
+     ORDER BY col_schema, col_position
   ),
 
 
