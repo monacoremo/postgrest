@@ -55,6 +55,7 @@ with
 
   tables as (
     select
+      c.oid,
       n.nspname as table_schema,
       c.relname as table_name,
       d.description as table_description,
@@ -99,6 +100,7 @@ with
   columns as (
      SELECT DISTINCT
          col_table as col_table,
+         info.table_oid as col_table_oid,
          info.column_name AS col_name,
          info.table_schema AS col_schema,
          info.table_name as col_table_name,
@@ -136,11 +138,12 @@ with
          -- CTE based on information_schema.columns
          columns AS (
              SELECT
-                 nc.nspname::name AS table_schema,
-                 c.relname::name AS table_name,
-                 a.attname::name AS column_name,
+                 a.attrelid as table_oid,
+                 nc.nspname AS table_schema,
+                 c.relname AS table_name,
+                 a.attname AS column_name,
                  d.description AS description,
-                 a.attnum::integer AS ordinal_position,
+                 a.attnum AS ordinal_position,
                  pg_get_expr(ad.adbin, ad.adrelid)::text AS column_default,
                  not (a.attnotnull OR t.typtype = 'd' AND t.typnotnull) AS is_nullable,
                      CASE
@@ -194,6 +197,7 @@ with
                  AND (nc.nspname = ANY ($1) OR kc.r_oid IS NOT NULL)
          )
          SELECT
+             table_oid,
              table_schema,
              table_name,
              column_name,
@@ -240,55 +244,27 @@ with
 
   m2o_rels as (
      select
-        rel_table,
-        rel_columns.array_agg as rel_columns,
         conname as rel_constraint,
-        rel_f_table,
-        rel_f_columns.array_agg as rel_f_columns,
+        (select tables from tables where tables.oid = conrelid) as rel_table,
+        (select tables from tables where tables.oid = confrelid) as rel_f_table,
+        array(
+          select columns
+          from columns
+          where
+            col_table_oid = conrelid
+            and col_position = any (conkey)
+        ) as rel_columns,
+        array(
+          select columns
+          from columns
+          where
+            col_table_oid = confrelid
+            and col_position = any (confkey)
+        ) as rel_f_columns,
         'M2O' as rel_type
-     from
-       pg_constraint
-       join pg_namespace ns1 on ns1.oid = connamespace
-       join pg_class tab on tab.oid = conrelid
-       join pg_class other on other.oid = confrelid
-       join pg_namespace ns2 on ns2.oid = other.relnamespace
-       join tables rel_table
-         on
-            rel_table.table_schema = ns1.nspname
-            and rel_table.table_name = tab.relname
-       join tables rel_f_table
-         on
-            rel_f_table.table_schema = ns2.nspname
-            and rel_f_table.table_name = other.relname
-       , lateral (
-         select
-           array_agg(cols.attname) AS cols,
-           array_agg(cols.attnum)  AS nums,
-           array_agg(refs.attname) AS refs
-         FROM
-          (select
-             unnest(conkey) AS col,
-             unnest(confkey) AS ref
-          ) k
-          join pg_attribute cols on cols.attrelid = conrelid and cols.attnum = col
-          join pg_attribute refs on refs.attrelid = confrelid and refs.attnum = ref
-       ) AS column_info
-       , lateral (
-          select array_agg(columns) from columns
-          where
-            col_schema = ns1.nspname
-            and col_table_name = tab.relname
-            and col_name = any (column_info.cols)
-       ) rel_columns
-       , lateral (
-          select array_agg(columns) from columns
-          where
-            col_schema = ns2.nspname
-            and col_table_name = other.relname
-            and col_name = any (column_info.refs)
-       ) rel_f_columns
-     WHERE confrelid != 0
-     ORDER BY conrelid, column_info.nums
+     from pg_constraint
+     where confrelid != 0
+     order by conrelid, conkey
   ),
 
 
