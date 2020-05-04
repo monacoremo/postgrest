@@ -1,10 +1,8 @@
 with
-
-
   -- Postgres version
 
   pg_version as (
-    SELECT
+    select
       current_setting('server_version_num')::integer as pgv_num,
       current_setting('server_version') as pgv_name
   ),
@@ -49,7 +47,6 @@ with
     where
       pn.nspname = any ($1)
   ),
-
 
 
   -- Tables
@@ -175,7 +172,7 @@ with
               and r.contype in ('f', 'p', 'u')
         )
       )
-     order by col_schema, col_position
+    order by col_schema, col_position
   ),
 
 
