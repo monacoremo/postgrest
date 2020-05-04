@@ -125,25 +125,56 @@ addForeignKeys rels = map addFk
       return $ ForeignKey colF
 
 addM2MRels :: [Relation] -> [Relation]
-addM2MRels rels = rels ++ addMirrorRel (mapMaybe junction2Rel junctions)
+addM2MRels rels =
+  rels ++ addMirrorRel (mapMaybe junction2Rel junctions)
   where
-    junctions = join $ map (combinations 2) $ filter (not . null) $ groupWith groupFn $ filter ( (==M2O). relType) rels
+    junctions =
+      join $ map (combinations 2) $ filter (not . null) $
+          groupWith groupFn $ filter ( (==M2O). relType) rels
+
     groupFn :: Relation -> Text
-    groupFn Relation{relTable=Table{tableSchema=s, tableName=t}} = s <> "_" <> t
+    groupFn Relation{relTable=Table{tableSchema=s, tableName=t}} =
+        s <> "_" <> t
+
     -- Reference : https://wiki.haskell.org/99_questions/Solutions/26
     combinations :: Int -> [a] -> [[a]]
     combinations 0 _  = [ [] ]
     combinations n xs = [ y:ys | y:xs' <- tails xs
                                , ys <- combinations (n-1) xs']
+
     junction2Rel [
-      Relation{relTable=jt, relColumns=jc1, relConstraint=const1, relFTable=t,  relFColumns=c},
-      Relation{             relColumns=jc2, relConstraint=const2, relFTable=ft, relFColumns=fc}
+      Relation
+        { relTable=jt
+        , relColumns=jc1
+        , relConstraint=const1
+        , relFTable=t
+        , relFColumns=c
+        },
+      Relation
+        { relColumns=jc2
+        , relConstraint=const2
+        , relFTable=ft
+        , relFColumns=fc
+        }
       ]
-      | jc1 /= jc2 && length jc1 == 1 && length jc2 == 1 = Just $ Relation t c Nothing ft fc M2M (Just $ Junction jt const1 jc1 const2 jc2)
+      | jc1 /= jc2 && length jc1 == 1 && length jc2 == 1 =
+          Just $
+            Relation
+              t
+              c
+              Nothing
+              ft
+              fc
+              M2M
+              (Just $ Junction jt const1 jc1 const2 jc2)
       | otherwise = Nothing
     junction2Rel _ = Nothing
-    addMirrorRel = concatMap (\rel@(Relation t c _ ft fc _ (Just (Junction jt const1 jc1 const2 jc2))) ->
-      [rel, Relation ft fc Nothing t c M2M (Just (Junction jt const2 jc2 const1 jc1))])
+
+    addMirrorRel =
+      concatMap (\rel@(Relation t c _ ft fc _ (Just (Junction jt const1 jc1 const2 jc2))) ->
+      [rel
+      , Relation ft fc Nothing t c M2M (Just (Junction jt const2 jc2 const1 jc1))
+      ])
 
 addViewPrimaryKeys :: [OldSourceColumn] -> [PrimaryKey] -> [PrimaryKey]
 addViewPrimaryKeys srcCols = concatMap (\pk ->

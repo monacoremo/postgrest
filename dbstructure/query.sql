@@ -1,5 +1,5 @@
 -- TODOs
-
+-- * why does columns need distinct?
 
 
 with
@@ -546,6 +546,26 @@ with
       m2o_rels.rel_columns as rel_f_columns
     from
       m2o_rels
+  ),
+
+  m2m_junctions as (
+    -- all pairs for each table
+    select
+      left_m2o_rels as left_rel,
+      right_m2o_rels as right_rel,
+      junctions.rel_table as junction
+
+    from
+      (select rel_table from m2o_rels group by rel_table) as junctions
+      join m2o_rels left_m2o_rels on (left_m2o_rels.rel_table).oid = (junctions.rel_table).oid
+      join m2o_rels right_m2o_rels on (right_m2o_rels.rel_table).oid = (junctions.rel_table).oid
+    where
+      left_m2o_rels <> right_m2o_rels
+  ),
+
+  m2m_rels as (
+    select 1
+
   ),
 
   rels as (
