@@ -213,86 +213,23 @@ with
   -- Primary keys
 
   primary_keys as (
-    with tc as (
       select
-        c.conname as constraint_name,
-        nr.nspname as table_schema,
-        r.relname as table_name
-      from pg_namespace nc,
-        pg_namespace nr,
-        pg_constraint c,
-        pg_class r
-      where
-        nr.nspname not in ('pg_catalog', 'information_schema')
-        and nc.oid = c.connamespace
-        and nr.oid = r.relnamespace
-        and c.conrelid = r.oid
-        and r.relkind = 'r'
-        and not pg_is_other_temp_schema(nr.oid)
-        and c.contype = 'p'
-    ),
-    kc as (
-      select
-        ss.conname as constraint_name,
-        ss.nr_nspname as table_schema,
-        ss.relname as table_name,
-        a.attname as column_name,
-        (ss.x).n as ordinal_position,
-        case
-          when ss.contype = 'f' then
-            information_schema._pg_index_position(ss.conindid, ss.confkey[(ss.x).n])
-          else
-            null
-        end::integer as position_in_unique_constraint
+        a.attname as pk_name,
+        pk_table
       from
-        pg_attribute a,
-        (
-          select
-            r.oid as roid,
-            r.relname,
-            r.relowner,
-            nc.nspname as nc_nspname,
-            nr.nspname as nr_nspname,
-            c.oid as coid,
-            c.conname,
-            c.contype,
-            c.conindid,
-            c.confkey,
-            information_schema._pg_expandarray(c.conkey) as x
-          from
-            pg_namespace nr,
-            pg_class r,
-            pg_namespace nc,
-            pg_constraint c
-          where
-            nr.oid = r.relnamespace
-            and r.oid = c.conrelid
-            and nc.oid = c.connamespace
-            and c.contype in ('p', 'u', 'f')
-            and r.relkind = 'r'
-            and not pg_is_other_temp_schema(nr.oid)
-        ) ss
+        pg_constraint c
+        join pg_class r on r.oid = c.conrelid
+        join pg_namespace nr on nr.oid = r.relnamespace
+        join tables pk_table on pk_table.oid = c.conrelid
+        join pg_attribute a on r.oid = a.attrelid
+        , information_schema._pg_expandarray(c.conkey) as x
       where
-        ss.roid = a.attrelid
-        and a.attnum = (ss.x).x
+        c.contype = 'p'
+        and r.relkind = 'r'
+        and nr.nspname not in ('pg_catalog', 'information_schema')
+        and not pg_is_other_temp_schema(nr.oid)
+        and a.attnum = x.x
         and not a.attisdropped
-    )
-    select
-      kc.table_schema,
-      kc.table_name,
-      kc.column_name as pk_name,
-      pk_table
-    from
-      tc
-      join kc
-        on
-          kc.table_name = tc.table_name
-          and kc.table_schema = tc.table_schema
-          and kc.constraint_name = tc.constraint_name
-      join tables pk_table
-        on
-          pk_table.table_schema = kc.table_schema
-          and pk_table.table_name = kc.table_name
   ),
 
 

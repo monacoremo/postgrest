@@ -35385,36 +35385,6 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "user_id"
-            }
-        , PrimaryKey
-            { pkTable = Table
-                { tableSchema = "test"
-                , tableName = "articleStars"
-                , tableDescription = Nothing
-                , tableInsertable = True
-                , tableIsAccessible = True
-                }
-            , pkName = "userId"
-            }
-        , PrimaryKey
-            { pkTable = Table
-                { tableSchema = "test"
-                , tableName = "limited_article_stars"
-                , tableDescription = Nothing
-                , tableInsertable = True
-                , tableIsAccessible = True
-                }
-            , pkName = "user_id"
-            }
-        , PrimaryKey
-            { pkTable = Table
-                { tableSchema = "private"
-                , tableName = "article_stars"
-                , tableDescription = Nothing
-                , tableInsertable = True
-                , tableIsAccessible = True
-                }
             , pkName = "article_id"
             }
         , PrimaryKey
@@ -35436,6 +35406,36 @@ DbStructure
                 , tableIsAccessible = True
                 }
             , pkName = "article_id"
+            }
+        , PrimaryKey
+            { pkTable = Table
+                { tableSchema = "private"
+                , tableName = "article_stars"
+                , tableDescription = Nothing
+                , tableInsertable = True
+                , tableIsAccessible = True
+                }
+            , pkName = "user_id"
+            }
+        , PrimaryKey
+            { pkTable = Table
+                { tableSchema = "test"
+                , tableName = "articleStars"
+                , tableDescription = Nothing
+                , tableInsertable = True
+                , tableIsAccessible = True
+                }
+            , pkName = "userId"
+            }
+        , PrimaryKey
+            { pkTable = Table
+                { tableSchema = "test"
+                , tableName = "limited_article_stars"
+                , tableDescription = Nothing
+                , tableInsertable = True
+                , tableIsAccessible = True
+                }
+            , pkName = "user_id"
             }
         , PrimaryKey
             { pkTable = Table
@@ -35585,7 +35585,7 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "birth_date"
+            , pkName = "last_name"
             }
         , PrimaryKey
             { pkTable = Table
@@ -35595,7 +35595,7 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "birth_date"
+            , pkName = "last_name"
             }
         , PrimaryKey
             { pkTable = Table
@@ -35605,7 +35605,7 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "last_name"
+            , pkName = "id"
             }
         , PrimaryKey
             { pkTable = Table
@@ -35615,7 +35615,7 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "last_name"
+            , pkName = "id"
             }
         , PrimaryKey
             { pkTable = Table
@@ -35645,7 +35645,7 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "id"
+            , pkName = "birth_date"
             }
         , PrimaryKey
             { pkTable = Table
@@ -35655,7 +35655,7 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "id"
+            , pkName = "birth_date"
             }
         , PrimaryKey
             { pkTable = Table
@@ -35775,7 +35775,7 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "schedule_id"
+            , pkName = "id"
             }
         , PrimaryKey
             { pkTable = Table
@@ -35785,7 +35785,7 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "id"
+            , pkName = "schedule_id"
             }
         , PrimaryKey
             { pkTable = Table
@@ -35915,7 +35915,7 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "k2"
+            , pkName = "k1"
             }
         , PrimaryKey
             { pkTable = Table
@@ -35925,7 +35925,7 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "k1"
+            , pkName = "k2"
             }
         , PrimaryKey
             { pkTable = Table
@@ -35955,7 +35955,7 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "last_name"
+            , pkName = "first_name"
             }
         , PrimaryKey
             { pkTable = Table
@@ -35965,7 +35965,7 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "first_name"
+            , pkName = "last_name"
             }
         , PrimaryKey
             { pkTable = Table
@@ -36311,7 +36311,7 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "day"
+            , pkName = "unit_id"
             }
         , PrimaryKey
             { pkTable = Table
@@ -36321,7 +36321,7 @@ DbStructure
                 , tableInsertable = True
                 , tableIsAccessible = True
                 }
-            , pkName = "unit_id"
+            , pkName = "day"
             }
         , PrimaryKey
             { pkTable = Table
