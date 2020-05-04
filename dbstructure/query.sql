@@ -210,11 +210,13 @@ with
 
   -- M2O relations
 
-  m2o_rels as (
+  table_m2o_rels as (
      select
         conname as rel_constraint,
         rel_table,
         rel_f_table,
+        rel_table.oid as rel_table_oid,
+        rel_f_table.oid as rel_f_table_oid,
         array(
           select columns
           from columns
@@ -272,8 +274,6 @@ with
         select
           n.nspname as view_schema,
           c.relname as view_name,
-          r.ev_action as view_definition,
-          last_target_list_wo_tail::text as x,
           substring(entry from ':resname (.*?) :') as view_colum_name,
           substring(entry from ':resorigtbl (.*?) :') as resorigtbl,
           substring(entry from ':resorigcol (.*?) :') as resorigcol
@@ -341,8 +341,76 @@ with
           view_schema, view_name, view_colum_name
   ),
 
-  view_m2o_rels as (
-    select 1
+  view_table_columns as (
+    select
+      c.oid as view_oid,
+      substring(entry from ':resname (.*?) :') as view_col_name,
+      substring(entry from ':resorigtbl (.*?) :')::oid as table_oid,
+      substring(entry from ':resorigcol (.*?) :')::integer as col_position
+    from
+      pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+      join pg_rewrite r on r.ev_class = c.oid
+      , regexp_replace(
+          r.ev_action,
+          -- "result" appears when the subselect is used inside "case when", see
+          -- `authors_have_book_in_decade` fixture
+          -- "resno"  appears in every other case
+          case when (select pgv_num from pg_version) < 100000 then
+            ':subselect {.*?:constraintDeps <>} :location \d+} :res(no|ult)'
+          else
+            ':subselect {.*?:stmt_len 0} :location \d+} :res(no|ult)'
+          end,
+          '',
+          'g'
+        ) as x
+      , regexp_split_to_array(x, 'targetList') as target_lists
+      , lateral (
+          select
+            (regexp_split_to_array(
+              target_lists[array_upper(target_lists, 1)], ':onConflict'
+            ))[1]
+        ) last_target_list_wo_tail
+      , unnest(regexp_split_to_array(last_target_list_wo_tail::text, 'TARGETENTRY')) as entry
+    where
+      c.relkind in ('v', 'm')
+      and n.nspname = ANY ($1)
+  ),
+
+  table_views as (
+    select
+      table_oid,
+      view_oid,
+      array_agg(col_pairs) as col_pais
+    from
+      view_table_columns cols
+      join columns table_col
+        on
+          table_col.col_table_oid = cols.table_oid
+          and table_col.col_position = cols.col_position
+      join columns view_col
+        on
+          view_col.col_table_oid = cols.view_oid
+          and view_col.col_name = cols.view_col_name
+      , lateral (select table_col, view_col) as col_pairs
+    group by
+      cols.view_oid, cols.table_oid
+  ),
+
+  -- Many to one relations from views to tables
+  view_table_m2o_rels as (
+     select
+        rels.rel_constraint,
+        rels.rel_f_table,
+        rels.rel_f_columns,
+        'M2O' as rel_type,
+
+        -- replace those by view
+        null as rel_columns,
+        null as rel_table
+    from
+       table_m2o_rels rels
+       join view_table_columns cols on cols.table_oid = rels.rel_f_table_oid
   )
 
 
@@ -357,6 +425,7 @@ with
       'raw_db_m2o_rels', coalesce(m2o_rels_agg.array_agg, array[]::record[]),
       'raw_db_primary_keys', coalesce(primary_keys_agg.array_agg, array[]::record[]),
       'raw_db_source_columns', coalesce(source_columns_agg.array_agg, array[]::record[]),
+      'table_views', table_views_agg.array_agg,
       'raw_db_pg_ver', pg_version
     ) as dbstructure
   from
@@ -364,7 +433,8 @@ with
     (select array_agg(schemas) from schemas) schemas_agg,
     (select array_agg(tables) from tables) as tables_agg,
     (select array_agg(columns) from columns) as columns_agg,
-    (select array_agg(m2o_rels) from m2o_rels) as m2o_rels_agg,
+    (select array_agg(table_m2o_rels) from table_m2o_rels) as m2o_rels_agg,
     (select array_agg(primary_keys) from primary_keys) as primary_keys_agg,
     (select array_agg(source_columns) from source_columns) as source_columns_agg,
+    (select array_agg(table_views) from table_views) as table_views_agg,
     pg_version
