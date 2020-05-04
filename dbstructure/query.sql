@@ -254,9 +254,10 @@ with
               -- "result" appears when the subselect is used inside "case when", see
               -- `authors_have_book_in_decade` fixture
               -- "resno"  appears in every other case
-              case when (select pgv_num from pg_version) < 100000
-                 then ':subselect {.*?:constraintDeps <>} :location \d+} :res(no|ult)'
-                 else ':subselect {.*?:stmt_len 0} :location \d+} :res(no|ult)'
+              case when (select pgv_num from pg_version) < 100000 then
+                ':subselect {.*?:constraintDeps <>} :location \d+} :res(no|ult)'
+              else
+                ':subselect {.*?:stmt_len 0} :location \d+} :res(no|ult)'
               end,
               '',
               'g'

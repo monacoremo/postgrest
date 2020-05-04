@@ -162,8 +162,22 @@ data PgType = Scalar QualifiedIdentifier | Composite QualifiedIdentifier derivin
 
 data RetType = Single PgType | SetOf PgType deriving (Eq, Show, Ord)
 
-data ProcVolatility = Volatile | Stable | Immutable
+data ProcVolatility
+  = Volatile
+  | Stable
+  | Immutable
   deriving (Eq, Show, Ord)
+
+instance FromJSON ProcVolatility where
+    parseJSON (Aeson.String value) =
+        case value of
+          "v" -> pure Volatile
+          "s" -> pure Stable
+          "i" -> pure Immutable
+          _ -> empty
+    parseJSON _ =
+        empty
+
 
 data ProcDescription = ProcDescription {
   pdSchema      :: Schema
@@ -185,7 +199,7 @@ data RawProcDescription =
     , procReturnTypeName :: Text
     , procReturnTypeIsSetof :: Bool
     , procReturnType :: Char
-    , procVolatility :: Char
+    , procVolatility :: ProcVolatility
     , procIsAccessible :: Bool
     } deriving (Show, Eq, Generic)
 

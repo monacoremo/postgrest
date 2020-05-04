@@ -105,8 +105,7 @@ loadProc raw =
           (procReturnTypeName raw)
           (procReturnTypeIsSetof raw)
           (procReturnType raw)
-    , pdVolatility =
-        parseVolatility (procVolatility raw)
+    , pdVolatility = procVolatility raw
     , pdIsAccessible = procIsAccessible raw
     }
 
@@ -139,11 +138,6 @@ parseRetType schema name isSetOf typ
                then Composite qi
                else Scalar qi
       _   -> Scalar qi -- 'b'ase, 'd'omain, 'e'num, 'r'ange
-
-parseVolatility :: Char -> ProcVolatility
-parseVolatility v | v == 'i' = Immutable
-                  | v == 's' = Stable
-                  | otherwise = Volatile -- only 'v' can happen here
 
 addForeignKeys :: [Relation] -> [Column] -> [Column]
 addForeignKeys rels = map addFk
