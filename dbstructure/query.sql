@@ -208,9 +208,31 @@ with
   ),
 
 
+  -- Primary keys
+
+  primary_keys as (
+      select
+        a.attname as pk_name,
+        pk_table
+      from
+        pg_constraint c
+        join pg_class r on r.oid = c.conrelid
+        join pg_namespace nr on nr.oid = r.relnamespace
+        join tables pk_table on pk_table.oid = c.conrelid
+        join pg_attribute a on r.oid = a.attrelid
+        , information_schema._pg_expandarray(c.conkey) as x
+      where
+        c.contype = 'p'
+        and r.relkind = 'r'
+        and nr.nspname not in ('pg_catalog', 'information_schema')
+        and not pg_is_other_temp_schema(nr.oid)
+        and a.attnum = x.x
+        and not a.attisdropped
+  ),
+
   -- M2O relations
 
-  table_m2o_rels as (
+  table_table_m2o_rels as (
      select
         conname as rel_constraint,
         rel_table,
@@ -242,28 +264,6 @@ with
      order by conrelid, conkey
   ),
 
-
-  -- Primary keys
-
-  primary_keys as (
-      select
-        a.attname as pk_name,
-        pk_table
-      from
-        pg_constraint c
-        join pg_class r on r.oid = c.conrelid
-        join pg_namespace nr on nr.oid = r.relnamespace
-        join tables pk_table on pk_table.oid = c.conrelid
-        join pg_attribute a on r.oid = a.attrelid
-        , information_schema._pg_expandarray(c.conkey) as x
-      where
-        c.contype = 'p'
-        and r.relkind = 'r'
-        and nr.nspname not in ('pg_catalog', 'information_schema')
-        and not pg_is_other_temp_schema(nr.oid)
-        and a.attnum = x.x
-        and not a.attisdropped
-  ),
 
 
   -- Source columns
@@ -403,9 +403,9 @@ with
   view_table_m2o_rels as (
      select
         rels.rel_constraint,
+        'M2O' as rel_type,
         rels.rel_f_table,
         rels.rel_f_columns,
-        'M2O' as rel_type,
 
         -- replace the rel_table with each view that refers to the rel_f_table
         rel_view as rel_table,
@@ -423,11 +423,150 @@ with
               and view_cols.col_name = cols.view_col_name
         ) as rel_columns
     from
-       table_m2o_rels rels
-       join table_views on (rels.rel_f_table).oid = table_views.table_oid
+       table_table_m2o_rels rels
+       join table_views on rels.rel_f_table_oid = table_views.table_oid
        join tables rel_view on rel_view.oid = table_views.view_oid
-  )
+  ),
 
+  table_view_m2o_rels as (
+     select
+        rels.rel_constraint,
+        'M2O' as rel_type,
+        rels.rel_table,
+        rels.rel_columns,
+
+        -- replace the rel_table with each view that refers to the rel_f_table
+        rel_f_view as rel_f_table,
+        array(
+          select
+            view_cols
+          from
+            unnest(rels.rel_column_positions) as pos
+            join view_table_columns cols
+              on
+                cols.table_oid = rels.rel_table_oid
+                and cols.col_position = pos
+            join columns view_cols
+              on view_cols.col_table_oid = rel_f_view.oid
+              and view_cols.col_name = cols.view_col_name
+        ) as rel_f_columns
+    from
+       table_table_m2o_rels rels
+       join table_views on rels.rel_table_oid = table_views.table_oid
+       join tables rel_f_view on rel_f_view.oid = table_views.view_oid
+  ),
+
+  view_view_m2o_rels as (
+     select
+        rels.rel_constraint,
+        'M2O' as rel_type,
+
+        rel_view as rel_table,
+        array(
+          select
+            view_cols
+          from
+            unnest(rels.rel_column_positions) as pos
+            join view_table_columns cols
+              on
+                cols.table_oid = rels.rel_table_oid
+                and cols.col_position = pos
+            join columns view_cols
+              on view_cols.col_table_oid = rel_view.oid
+              and view_cols.col_name = cols.view_col_name
+        ) as rel_columns,
+
+        rel_f_view as rel_f_table,
+        array(
+          select
+            view_cols
+          from
+            unnest(rels.rel_f_column_positions) as pos
+            join view_table_columns cols
+              on
+                cols.table_oid = rels.rel_table_oid
+                and cols.col_position = pos
+            join columns view_cols
+              on view_cols.col_table_oid = rel_f_view.oid
+              and view_cols.col_name = cols.view_col_name
+        ) as rel_f_columns
+    from
+       table_table_m2o_rels rels
+       join table_views on rels.rel_table_oid = table_views.table_oid
+       join tables rel_view on rel_view.oid = table_views.view_oid
+       join table_views table_f_views on rels.rel_f_table_oid = table_f_views.table_oid
+       join tables rel_f_view on rel_f_view.oid = table_views.view_oid
+  ),
+
+  m2o_rels as (
+    select
+      rel_constraint::text,
+      rel_type::text,
+      rel_table::record,
+      rel_columns::record[],
+      rel_f_table::record,
+      rel_f_columns::record[]
+    from table_table_m2o_rels
+    union all
+    select
+      rel_constraint::text,
+      rel_type::text,
+      rel_table::record,
+      rel_columns::record[],
+      rel_f_table::record,
+      rel_f_columns::record[]
+    from table_view_m2o_rels
+    union all
+    select
+      rel_constraint::text,
+      rel_type::text,
+      rel_table::record,
+      rel_columns::record[],
+      rel_f_table::record,
+      rel_f_columns::record[]
+    from view_table_m2o_rels
+    union all
+    select
+      rel_constraint::text,
+      rel_type::text,
+      rel_table::record,
+      rel_columns::record[],
+      rel_f_table::record,
+      rel_f_columns::record[]
+    from table_view_m2o_rels
+  ),
+
+  o2m_rels as (
+    select
+      rel_constraint,
+      'O2M' as rel_type,
+      m2o_rels.rel_f_table as rel_table,
+      m2o_rels.rel_f_columns as rel_columns,
+      m2o_rels.rel_table as rel_f_table,
+      m2o_rels.rel_columns as rel_f_columns
+    from
+      m2o_rels
+  ),
+
+  rels as (
+    select
+      rel_constraint::text,
+      rel_type::text,
+      rel_table::record,
+      rel_columns::record[],
+      rel_f_table::record,
+      rel_f_columns::record[]
+    from m2o_rels
+    union all
+    select
+      rel_constraint::text,
+      rel_type::text,
+      rel_table::record,
+      rel_columns::record[],
+      rel_f_table::record,
+      rel_f_columns::record[]
+    from o2m_rels
+  )
 
   -- Main query
 
@@ -437,11 +576,9 @@ with
       'raw_db_schemas', coalesce(schemas_agg.array_agg, array[]::record[]),
       'raw_db_tables', coalesce(tables_agg.array_agg, array[]::record[]),
       'raw_db_columns', coalesce(columns_agg.array_agg, array[]::record[]),
-      'raw_db_m2o_rels', coalesce(m2o_rels_agg.array_agg, array[]::record[]),
+      'raw_db_m2o_rels', coalesce(rels_agg.array_agg, array[]::record[]),
       'raw_db_primary_keys', coalesce(primary_keys_agg.array_agg, array[]::record[]),
       'raw_db_source_columns', coalesce(source_columns_agg.array_agg, array[]::record[]),
-      'table_views', table_views_agg.array_agg,
-      'view_table_m2o_rels', view_table_m2o_rels_agg.array_agg,
       'raw_db_pg_ver', pg_version
     ) as dbstructure
   from
@@ -449,9 +586,7 @@ with
     (select array_agg(schemas) from schemas) schemas_agg,
     (select array_agg(tables) from tables) as tables_agg,
     (select array_agg(columns) from columns) as columns_agg,
-    (select array_agg(table_m2o_rels) from table_m2o_rels) as m2o_rels_agg,
+    (select array_agg(rels) from rels) as rels_agg,
     (select array_agg(primary_keys) from primary_keys) as primary_keys_agg,
     (select array_agg(source_columns) from source_columns) as source_columns_agg,
-    (select array_agg(table_views) from table_views) as table_views_agg,
-    (select array_agg(view_table_m2o_rels) from view_table_m2o_rels) as view_table_m2o_rels_agg,
     pg_version
