@@ -156,7 +156,11 @@ data PgArg = PgArg {
   pgaName :: Text
 , pgaType :: Text
 , pgaReq  :: Bool
-} deriving (Show, Eq, Ord)
+} deriving (Show, Eq, Ord, Generic)
+
+instance FromJSON PgArg where
+    parseJSON =
+        Aeson.genericParseJSON aesonOptions
 
 data PgType = Scalar QualifiedIdentifier | Composite QualifiedIdentifier deriving (Eq, Show, Ord)
 
@@ -169,15 +173,10 @@ data ProcVolatility
   deriving (Eq, Show, Ord)
 
 instance FromJSON ProcVolatility where
-    parseJSON (Aeson.String value) =
-        case value of
-          "v" -> pure Volatile
-          "s" -> pure Stable
-          "i" -> pure Immutable
-          _ -> empty
-    parseJSON _ =
-        empty
-
+  parseJSON (Aeson.String "v") = pure Volatile
+  parseJSON (Aeson.String "s") = pure Stable
+  parseJSON (Aeson.String "i") = pure Immutable
+  parseJSON _ = empty
 
 data ProcDescription = ProcDescription {
   pdSchema      :: Schema
@@ -195,12 +194,12 @@ data RawProcDescription =
     , procName :: Text
     , procDescription :: Maybe Text
     , procArgs :: Text
-    , procReturnTypeSchema :: Text
-    , procReturnTypeName :: Text
+    , procReturnTypeQi :: QualifiedIdentifier
     , procReturnTypeIsSetof :: Bool
-    , procReturnType :: Char
+    , procReturnTypeIsComposite :: Bool
     , procVolatility :: ProcVolatility
     , procIsAccessible :: Bool
+    , procNewArgs :: [PgArg]
     } deriving (Show, Eq, Generic)
 
 instance FromJSON RawProcDescription where
@@ -355,7 +354,12 @@ data QualifiedIdentifier = QualifiedIdentifier {
   qiSchema :: Schema
 , qiName   :: TableName
 } deriving (Show, Eq, Ord, Generic)
+
 instance Hashable QualifiedIdentifier
+
+instance FromJSON QualifiedIdentifier where
+    parseJSON =
+        Aeson.genericParseJSON aesonOptions
 
 -- | The relationship [cardinality](https://en.wikipedia.org/wiki/Cardinality_(data_modeling)).
 -- | TODO: missing one-to-one

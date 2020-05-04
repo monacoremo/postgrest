@@ -8,7 +8,6 @@ The schema cache is necessary for resource embedding, foreign keys are used for 
 
 These queries are executed once at startup or when PostgREST is reloaded.
 -}
-
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NamedFieldPuns        #-}
@@ -16,6 +15,7 @@ These queries are executed once at startup or when PostgREST is reloaded.
 {-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE TemplateHaskell       #-}
 {-# LANGUAGE TypeSynonymInstances  #-}
+
 module PostgREST.DbStructure (
   getDbStructure
 , accessibleTables
@@ -101,10 +101,9 @@ loadProc raw =
     , pdArgs = parseArgs $ procArgs raw
     , pdReturnType =
         parseRetType
-          (procReturnTypeSchema raw)
-          (procReturnTypeName raw)
+          (procReturnTypeQi raw)
           (procReturnTypeIsSetof raw)
-          (procReturnType raw)
+          (procReturnTypeIsComposite raw)
     , pdVolatility = procVolatility raw
     , pdIsAccessible = procIsAccessible raw
     }
@@ -118,26 +117,23 @@ parseArgs =
 
 parseArg :: Text -> Maybe PgArg
 parseArg a =
-  let arg = lastDef "" $ splitOn "INOUT " a
-      (body, def) = breakOn " DEFAULT " arg
-      (name, typ) = breakOn " " body in
+  let
+    arg = lastDef "" $ splitOn "INOUT " a
+    (body, def) = breakOn " DEFAULT " arg
+    (name, typ) = breakOn " " body
+  in
   if T.null typ
      then Nothing
      else Just $
        PgArg (dropAround (== '"') name) (strip typ) (T.null def)
 
-parseRetType :: Text -> Text -> Bool -> Char -> RetType
-parseRetType schema name isSetOf typ
+parseRetType :: QualifiedIdentifier -> Bool -> Bool -> RetType
+parseRetType qi isSetOf isComposite
   | isSetOf   = SetOf pgType
   | otherwise = Single pgType
   where
-    qi = QualifiedIdentifier schema name
-    pgType = case typ of
-      'c' -> Composite qi
-      'p' -> if name == "record" -- Only pg pseudo type that is a row type is 'record'
-               then Composite qi
-               else Scalar qi
-      _   -> Scalar qi -- 'b'ase, 'd'omain, 'e'num, 'r'ange
+    pgType =
+        if isComposite then Composite qi else Scalar qi
 
 addForeignKeys :: [Relation] -> [Column] -> [Column]
 addForeignKeys rels = map addFk

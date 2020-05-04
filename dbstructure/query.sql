@@ -1,3 +1,7 @@
+-- TODOs
+
+
+
 with
   -- Postgres version
 
@@ -31,12 +35,41 @@ with
       p.proname as proc_name,
       d.description as proc_description,
       pg_get_function_arguments(p.oid) as proc_args,
-      tn.nspname as proc_return_type_schema,
-      coalesce(comp.relname, t.typname) as proc_return_type_name,
+      json_build_object(
+        'qi_schema', tn.nspname,
+        'qi_name', coalesce(comp.relname, t.typname)
+      ) as proc_return_type_qi,
       p.proretset as proc_return_type_is_setof,
-      t.typtype as proc_return_type,
+      case t.typtype
+        when 'c' then true
+        when 'p' then coalesce(comp.relname, t.typname) = 'record' -- Only pg pseudo type that is a row type is 'record'
+        else false -- 'b'ase, 'd'omain, 'e'num, 'r'ange
+      end as proc_return_type_is_composite,
       p.provolatile as proc_volatility,
-      has_function_privilege(p.oid, 'execute') as proc_is_accessible
+      has_function_privilege(p.oid, 'execute') as proc_is_accessible,
+      coalesce(array(
+        select
+          json_build_object(
+            'pga_name', parsed.name,
+            'pga_type', parsed.typ,
+            'pga_req', not parsed.has_default
+          )
+        from
+          regexp_split_to_table(pg_get_function_arguments(p.oid), ', ') as args
+          , regexp_split_to_array(args, ' DEFAULT ') as args_with_default
+          , regexp_matches(
+              args_with_default[1],
+              '^(IN |INOUT |OUT |)([^\"]\S+?[^\"]|\"(\S+?)\")( (.+?))?$'
+          ) as groups
+          , lateral (
+              select
+                groups[1] as inout,
+                coalesce(groups[2], groups[3]) as name,
+                coalesce(groups[5], '') as typ,
+                args_with_default[2] is not null as has_default
+          ) as parsed
+        where parsed.inout <> 'OUT '
+      ), array[]::json[]) as proc_new_args
     from
       pg_proc p
       join pg_namespace pn on pn.oid = p.pronamespace
