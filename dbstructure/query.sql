@@ -224,6 +224,7 @@ with
             col_table_oid = conrelid
             and col_position = any (conkey)
         ) as rel_columns,
+        conkey as rel_column_positions,
         array(
           select columns
           from columns
@@ -231,6 +232,7 @@ with
             col_table_oid = confrelid
             and col_position = any (confkey)
         ) as rel_f_columns,
+        confkey as rel_f_column_positions,
         'M2O' as rel_type
      from
        pg_constraint
@@ -405,12 +407,25 @@ with
         rels.rel_f_columns,
         'M2O' as rel_type,
 
-        -- replace those by view
-        null as rel_columns,
-        null as rel_table
+        -- replace the rel_table with each view that refers to the rel_f_table
+        rel_view as rel_table,
+        array(
+          select
+            view_cols
+          from
+            unnest(rels.rel_f_column_positions) as pos
+            join view_table_columns cols
+              on
+                cols.table_oid = rels.rel_f_table_oid
+                and cols.col_position = pos
+            join columns view_cols
+              on view_cols.col_table_oid = rel_view.oid
+              and view_cols.col_name = cols.view_col_name
+        ) as rel_columns
     from
        table_m2o_rels rels
-       join view_table_columns cols on cols.table_oid = rels.rel_f_table_oid
+       join table_views on (rels.rel_f_table).oid = table_views.table_oid
+       join tables rel_view on rel_view.oid = table_views.view_oid
   )
 
 
@@ -426,6 +441,7 @@ with
       'raw_db_primary_keys', coalesce(primary_keys_agg.array_agg, array[]::record[]),
       'raw_db_source_columns', coalesce(source_columns_agg.array_agg, array[]::record[]),
       'table_views', table_views_agg.array_agg,
+      'view_table_m2o_rels', view_table_m2o_rels_agg.array_agg,
       'raw_db_pg_ver', pg_version
     ) as dbstructure
   from
@@ -437,4 +453,5 @@ with
     (select array_agg(primary_keys) from primary_keys) as primary_keys_agg,
     (select array_agg(source_columns) from source_columns) as source_columns_agg,
     (select array_agg(table_views) from table_views) as table_views_agg,
+    (select array_agg(view_table_m2o_rels) from view_table_m2o_rels) as view_table_m2o_rels_agg,
     pg_version
