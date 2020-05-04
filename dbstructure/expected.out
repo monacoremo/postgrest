@@ -36830,7 +36830,13 @@ DbStructure
                     { pdSchema = "test"
                     , pdName = "overloaded"
                     , pdDescription = Nothing
-                    , pdArgs = []
+                    , pdArgs =
+                        [ PgArg
+                            { pgaName = "json"
+                            , pgaType = ""
+                            , pgaReq = True
+                            }
+                        ]
                     , pdReturnType = SetOf
                         ( Composite
                             ( QualifiedIdentifier
@@ -37329,7 +37335,13 @@ DbStructure
                     { pdSchema = "test"
                     , pdName = "anti_id"
                     , pdDescription = Nothing
-                    , pdArgs = []
+                    , pdArgs =
+                        [ PgArg
+                            { pgaName = "test.items"
+                            , pgaType = ""
+                            , pgaReq = True
+                            }
+                        ]
                     , pdReturnType = Single
                         ( Scalar
                             ( QualifiedIdentifier
@@ -37353,7 +37365,13 @@ DbStructure
                     { pdSchema = "test"
                     , pdName = "always_true"
                     , pdDescription = Nothing
-                    , pdArgs = []
+                    , pdArgs =
+                        [ PgArg
+                            { pgaName = "test.items"
+                            , pgaType = ""
+                            , pgaReq = True
+                            }
+                        ]
                     , pdReturnType = Single
                         ( Scalar
                             ( QualifiedIdentifier
@@ -37471,7 +37489,13 @@ DbStructure
                     { pdSchema = "test"
                     , pdName = "is_first"
                     , pdDescription = Nothing
-                    , pdArgs = []
+                    , pdArgs =
+                        [ PgArg
+                            { pgaName = "test.items"
+                            , pgaType = ""
+                            , pgaReq = True
+                            }
+                        ]
                     , pdReturnType = Single
                         ( Scalar
                             ( QualifiedIdentifier
@@ -38123,7 +38147,13 @@ DbStructure
                     { pdSchema = "test"
                     , pdName = "computed_overload"
                     , pdDescription = Nothing
-                    , pdArgs = []
+                    , pdArgs =
+                        [ PgArg
+                            { pgaName = "test.items2"
+                            , pgaType = ""
+                            , pgaReq = True
+                            }
+                        ]
                     , pdReturnType = Single
                         ( Scalar
                             ( QualifiedIdentifier
@@ -38139,7 +38169,13 @@ DbStructure
                     { pdSchema = "test"
                     , pdName = "computed_overload"
                     , pdDescription = Nothing
-                    , pdArgs = []
+                    , pdArgs =
+                        [ PgArg
+                            { pgaName = "test.items"
+                            , pgaType = ""
+                            , pgaReq = True
+                            }
+                        ]
                     , pdReturnType = Single
                         ( Scalar
                             ( QualifiedIdentifier
@@ -38403,7 +38439,18 @@ DbStructure
                     { pdSchema = "test"
                     , pdName = "file_fdw_validator"
                     , pdDescription = Nothing
-                    , pdArgs = []
+                    , pdArgs =
+                        [ PgArg
+                            { pgaName = "text[]"
+                            , pgaType = ""
+                            , pgaReq = True
+                            }
+                        , PgArg
+                            { pgaName = "oid"
+                            , pgaType = ""
+                            , pgaReq = True
+                            }
+                        ]
                     , pdReturnType = Single
                         ( Scalar
                             ( QualifiedIdentifier
@@ -38523,7 +38570,13 @@ DbStructure
                     { pdSchema = "test"
                     , pdName = "number_of_labels"
                     , pdDescription = Nothing
-                    , pdArgs = []
+                    , pdArgs =
+                        [ PgArg
+                            { pgaName = "test.ltree_sample"
+                            , pgaType = ""
+                            , pgaReq = True
+                            }
+                        ]
                     , pdReturnType = Single
                         ( Scalar
                             ( QualifiedIdentifier

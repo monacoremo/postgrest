@@ -31,9 +31,6 @@ import qualified Data.HashMap.Strict           as M
 import qualified Data.List                     as L
 import           Data.Set                      as S (fromList)
 import           Data.String
-import           Data.Text                     (breakOn, dropAround,
-                                                split, splitOn, strip)
-import qualified Data.Text                     as T
 import           GHC.Exts                      (groupWith)
 import qualified Hasql.Decoders                as HD
 import qualified Hasql.Encoders                as HE
@@ -42,8 +39,7 @@ import qualified Hasql.Statement               as H
 import qualified Hasql.Transaction             as HT
 import           PostgREST.Private.Common
 import           PostgREST.Types
-import           Protolude                     hiding (toS)
-import           Protolude.Conv                (toS)
+import           Protolude
 import           Protolude.Unsafe              (unsafeHead)
 
 getDbStructure :: [Schema] -> PgVersion -> HT.Transaction DbStructure
@@ -82,15 +78,15 @@ parseDbStructure raw =
 
 accessibleTables :: DbStructure -> [Table]
 accessibleTables structure =
-    filter tableIsAccessible (dbTables structure)
+   filter tableIsAccessible (dbTables structure)
 
 accessibleProcs :: DbStructure -> ProcsMap
 accessibleProcs structure =
-    fmap (filter pdIsAccessible) (dbProcs structure)
+  fmap (filter pdIsAccessible) (dbProcs structure)
 
 procsMap :: [ProcDescription] -> ProcsMap
 procsMap procs =
-    M.fromListWith (++) . map (\(x,y) -> (x, [y])) . sort $ map addKey procs
+  M.fromListWith (++) . map (\(x,y) -> (x, [y])) . sort $ map addKey procs
 
 loadProc :: RawProcDescription -> ProcDescription
 loadProc raw =
@@ -98,7 +94,7 @@ loadProc raw =
     { pdSchema = procSchema raw
     , pdName = procName raw
     , pdDescription = procDescription raw
-    , pdArgs = parseArgs $ procArgs raw
+    , pdArgs = procArgs raw
     , pdReturnType =
         parseRetType
           (procReturnTypeQi raw)
@@ -111,29 +107,12 @@ loadProc raw =
 addKey :: ProcDescription -> (QualifiedIdentifier, ProcDescription)
 addKey pd = (QualifiedIdentifier (pdSchema pd) (pdName pd), pd)
 
-parseArgs :: Text -> [PgArg]
-parseArgs =
-    mapMaybe parseArg . filter (not . isPrefixOf "OUT" . toS) . map strip . split (==',')
-
-parseArg :: Text -> Maybe PgArg
-parseArg a =
-  let
-    arg = lastDef "" $ splitOn "INOUT " a
-    (body, def) = breakOn " DEFAULT " arg
-    (name, typ) = breakOn " " body
-  in
-  if T.null typ
-     then Nothing
-     else Just $
-       PgArg (dropAround (== '"') name) (strip typ) (T.null def)
-
 parseRetType :: QualifiedIdentifier -> Bool -> Bool -> RetType
 parseRetType qi isSetOf isComposite
-  | isSetOf   = SetOf pgType
+  | isSetOf = SetOf pgType
   | otherwise = Single pgType
   where
-    pgType =
-        if isComposite then Composite qi else Scalar qi
+    pgType = if isComposite then Composite qi else Scalar qi
 
 addForeignKeys :: [Relation] -> [Column] -> [Column]
 addForeignKeys rels = map addFk

@@ -34,7 +34,6 @@ with
       pn.nspname as proc_schema,
       p.proname as proc_name,
       d.description as proc_description,
-      pg_get_function_arguments(p.oid) as proc_args,
       json_build_object(
         'qi_schema', tn.nspname,
         'qi_name', coalesce(comp.relname, t.typname)
@@ -59,17 +58,17 @@ with
           , regexp_split_to_array(args, ' DEFAULT ') as args_with_default
           , regexp_matches(
               args_with_default[1],
-              '^(IN |INOUT |OUT |)([^\"]\S+?[^\"]|\"(\S+?)\")( (.+?))?$'
+              '^(IN |INOUT |OUT |)(([^\" ]\S*?)|\"(\S+?)\")( (.+?))?$'
           ) as groups
           , lateral (
               select
                 groups[1] as inout,
-                coalesce(groups[2], groups[3]) as name,
-                coalesce(groups[5], '') as typ,
+                coalesce(groups[3], groups[4]) as name,
+                coalesce(groups[6], '') as typ,
                 args_with_default[2] is not null as has_default
           ) as parsed
         where parsed.inout <> 'OUT '
-      ), array[]::json[]) as proc_new_args
+      ), array[]::json[]) as proc_args
     from
       pg_proc p
       join pg_namespace pn on pn.oid = p.pronamespace
@@ -340,6 +339,10 @@ with
           resorigtbl <> '0'
         order by
           view_schema, view_name, view_colum_name
+  ),
+
+  view_m2o_rels as (
+    select 1
   )
 
 

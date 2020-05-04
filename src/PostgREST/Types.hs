@@ -193,13 +193,12 @@ data RawProcDescription =
     { procSchema :: Schema
     , procName :: Text
     , procDescription :: Maybe Text
-    , procArgs :: Text
     , procReturnTypeQi :: QualifiedIdentifier
     , procReturnTypeIsSetof :: Bool
     , procReturnTypeIsComposite :: Bool
     , procVolatility :: ProcVolatility
     , procIsAccessible :: Bool
-    , procNewArgs :: [PgArg]
+    , procArgs :: [PgArg]
     } deriving (Show, Eq, Generic)
 
 instance FromJSON RawProcDescription where
