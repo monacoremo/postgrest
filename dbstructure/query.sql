@@ -171,6 +171,7 @@ with
       and n.nspname = any ($1)
   ),
 
+
   -- Primary keys
 
   table_primary_keys as (
@@ -396,9 +397,6 @@ with
         ) as col_maps
     where col_maps.col_map is not null
   ),
-/*
--- view_view_m2o_rels
-*/
 
   m2o_rels as (
     select * from table_table_m2o_rels
@@ -432,31 +430,52 @@ with
         ) as col_maps
     where col_maps.col_map is not null
   ),
-/*
 
   m2m_rels as (
     select
-      'M2M' as rel_type,
-      left_rels.rel_f_table as rel_table,
-      left_rels.rel;_f_columns as rel_columns,
-      right_rels.rel_f_table as rel_f_table,
-      right_rels.rel_f_columns as rel_f_columns,
+      left_rels.rel_f_table_oid as rel_table_oid,
+      right_rels.rel_f_table_oid as rel_f_table_oid,
+      m2m_col_maps.m2m_col_map as rel_col_map,
       json_build_object(
-        'jun_table', left_rels.rel_table,
+        'jun_table_oid', left_rels.rel_table_oid,
         'jun_constraint1', left_rels.rel_constraint,
-        'jun_cols1', left_rels.rel_columns,
         'jun_constraint2', right_rels.rel_constraint,
-        'jun_cols2', right_rels.rel_columns
+        'jun_col_map', junction_col_maps.junction_col_map
       ) as rel_junction
     from
-      -- all combinations of rels that have the same rel_table
       m2o_rels left_rels
+      , lateral (
+          select array_agg(from_col order by from_col) as col_map
+          from unnest(left_rels.rel_col_map) as col_map(from_col smallint, to_col smallint)
+        ) left_cols
+      , lateral (
+          select array_agg(to_col order by from_col) as col_map
+          from unnest(left_rels.rel_col_map) as col_map(from_col smallint, to_col smallint)
+        ) left_f_cols
       , m2o_rels right_rels
+      , lateral (
+          select array_agg(from_col order by from_col) as col_map
+          from unnest(right_rels.rel_col_map) as col_map(from_col smallint, to_col smallint)
+        ) right_cols
+      , lateral (
+          select array_agg(to_col order by from_col) as col_map
+          from unnest(right_rels.rel_col_map) as col_map(from_col smallint, to_col smallint)
+        ) right_f_cols
+      , lateral (
+          select array_agg(m2m_col_map) as m2m_col_map
+          from
+            unnest(left_f_cols.col_map, right_f_cols.col_map) as m2m_col_map(from_col, to_col)
+        ) as m2m_col_maps
+      , lateral (
+          select array_agg(junction_col_map) as junction_col_map
+          from
+            unnest(left_cols.col_map, right_cols.col_map) as junction_col_map(from_col, to_col)
+        ) as junction_col_maps
     where
-      (right_rels.rel_table).oid = (left_rels.rel_table).oid
-      and right_rels.rel_columns <> left_rels.rel_columns
+      left_rels.rel_table_oid = right_rels.rel_table_oid
+      and left_cols <> right_cols
+      and array_length(junction_col_maps.junction_col_map, 1) = 1
   ),
-*/
 
   rels as (
     select
@@ -464,7 +483,8 @@ with
       rel_constraint,
       rel_table_oid,
       rel_f_table_oid,
-      rel_col_map
+      rel_col_map,
+      null::json as rel_junction
     from m2o_rels
     union all
     select
@@ -472,18 +492,18 @@ with
       rel_constraint,
       rel_table_oid,
       rel_f_table_oid,
-      rel_col_map
+      rel_col_map,
+      null::json as rel_junction
     from o2m_rels
- /*   union all
+    union all
     select
+      'M2M' as rel_type,
       null::text as rel_constraint,
-      rel_type::text,
-      rel_table::record,
-      rel_columns::record[],
-      rel_f_table::record,
-      rel_f_columns::record[],
-      rel_junction::json
-    from m2m_rels*/
+      rel_table_oid,
+      rel_f_table_oid,
+      rel_col_map,
+      rel_junction
+    from m2m_rels
   )
 
   -- Main query

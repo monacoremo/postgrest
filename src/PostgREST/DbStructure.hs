@@ -22,6 +22,7 @@ module PostgREST.DbStructure (
   getDbStructure
 , accessibleTables
 , accessibleProcs
+, RawDbStructure
 , parseDbStructure
 , getPgVersion
 ) where
@@ -39,7 +40,7 @@ import qualified Hasql.Session                 as H
 import qualified Hasql.Statement               as H
 import qualified Hasql.Transaction             as HT
 import qualified PostgREST.Private.Common as Common
-import           PostgREST.Types hiding (Table(..), Column(..), Relation(..))
+import           PostgREST.Types hiding (Table(..), Column(..), Relation(..), Junction(..))
 import qualified PostgREST.Types as Types
 import           Protolude
 
@@ -119,29 +120,61 @@ type Columns = M.HashMap (Oid, ColPosition) RawColumn
 
 loadRelation :: Tables -> Columns -> RawRelation -> Maybe Types.Relation
 loadRelation tabs cols raw =
-  loadRelation' raw cols
+  let
+    junction =
+      case relJunction raw of
+        Just j ->
+          loadJunction tabs cols j
+        Nothing ->
+          Nothing
+  in
+  loadRelation' raw cols junction
     <$> M.lookup (relTableOid raw) tabs
     <*> M.lookup (relFTableOid raw) tabs
 
-loadRelation' :: RawRelation -> Columns -> RawTable -> RawTable -> Types.Relation
-loadRelation' raw cols tab fTab =
+loadRelation' :: RawRelation -> Columns -> Maybe Types.Junction -> RawTable -> RawTable -> Types.Relation
+loadRelation' raw cols junc tab fTab =
   let
     lookupCol :: RawTable -> ColPosition -> Maybe RawColumn
     lookupCol t pos =
-        M.lookup (tableOid t, pos) cols
+      M.lookup (tableOid t, pos) cols
   in
   Types.Relation
     { Types.relTable = loadTable tab
     , Types.relFTable = loadTable fTab
     , Types.relConstraint = relConstraint raw
     , Types.relType = relType raw
-    , Types.relJunction = Nothing
+    , Types.relJunction = junc
     , Types.relColumns =
         fmap (\c -> loadColumn' c tab) . catMaybes .
           fmap ((lookupCol tab) . fromCol) $ relColMap raw
     , Types.relFColumns =
         fmap (\c -> loadColumn' c fTab) . catMaybes .
           fmap ((lookupCol fTab) . toCol) $ relColMap raw
+    }
+
+loadJunction :: Tables -> Columns -> RawJunction -> Maybe Types.Junction
+loadJunction tabs cols raw =
+  loadJunction' raw cols
+    <$> M.lookup (junTableOid raw) tabs
+
+loadJunction' :: RawJunction -> Columns -> RawTable -> Types.Junction
+loadJunction' raw cols tab =
+  let
+    lookupCol :: RawTable -> ColPosition -> Maybe RawColumn
+    lookupCol t pos =
+        M.lookup (tableOid t, pos) cols
+  in
+  Types.Junction
+    { Types.junTable = loadTable tab
+    , Types.junConstraint1 = junConstraint1 raw
+    , Types.junConstraint2 = junConstraint2 raw
+    , Types.junCols1 =
+        fmap (\c -> loadColumn' c tab) . catMaybes .
+          fmap ((lookupCol tab) . fromCol) $ junColMap raw
+    , Types.junCols2 =
+        fmap (\c -> loadColumn' c tab) . catMaybes .
+          fmap ((lookupCol tab) . toCol) $ junColMap raw
     }
 
 accessibleTables :: DbStructure -> [Types.Table]
@@ -182,7 +215,6 @@ parseRetType qi isSetOf isComposite
   where
     pgType = if isComposite then Composite qi else Scalar qi
 
-
 addForeignKeys :: [Types.Relation] -> [Types.Column] -> [Types.Column]
 addForeignKeys rels = map addFk
   where
@@ -209,9 +241,7 @@ getPgVersion = H.statement () $ H.Statement sql HE.noParams versionRow False
     versionRow = HD.singleRow $ PgVersion <$> Common.column HD.int4 <*> Common.column HD.text
 
 
-
 -- RAW DB STRUCTURE
-
 
 getRawDbStructure :: [Schema] -> HT.Transaction RawDbStructure
 getRawDbStructure schemas =
@@ -342,7 +372,7 @@ instance FromJSON ColMapping where
 -- | Junction table on an M2M relationship
 data RawJunction =
   Junction
-    { junTableOid :: Integer
+    { junTableOid :: Oid
     , junConstraint1 :: Maybe ConstraintName
     , junConstraint2 :: Maybe ConstraintName
     , junColMap :: [ColMapping]
