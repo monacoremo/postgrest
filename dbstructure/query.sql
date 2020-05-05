@@ -125,17 +125,97 @@ with
   ),
 
 
+  -- Source columns, query explanation at
+  -- https://gist.github.com/steve-chavez/7ee0e6590cddafb532e5f00c46275569
+
+  view_col_rels as (
+    select
+      c.oid as view_oid,
+      (
+        select a.attnum
+        from pg_attribute a
+        where
+          a.attrelid = c.oid
+          and a.attname = view_col_name
+      ) as view_col_position,
+      substring(entry from ':resorigtbl (.*?) :')::oid as table_oid,
+      substring(entry from ':resorigcol (.*?) :')::integer as table_col_position
+    from
+      pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+      join pg_rewrite r on r.ev_class = c.oid
+      , regexp_replace(
+          r.ev_action,
+          -- "result" appears when the subselect is used inside "case when", see
+          -- `authors_have_book_in_decade` fixture
+          -- "resno"  appears in every other case
+          case when (select pgv_num from pg_version) < 100000 then
+            ':subselect {.*?:constraintDeps <>} :location \d+} :res(no|ult)'
+          else
+            ':subselect {.*?:stmt_len 0} :location \d+} :res(no|ult)'
+          end,
+          '',
+          'g'
+        ) as x
+      , regexp_split_to_array(x, 'targetList') as target_lists
+      , lateral (
+          select
+            (regexp_split_to_array(
+              target_lists[array_upper(target_lists, 1)], ':onConflict'
+            ))[1]
+        ) last_target_list_wo_tail
+      , unnest(regexp_split_to_array(last_target_list_wo_tail::text, 'TARGETENTRY')) as entry
+      , substring(entry from ':resname (.*?) :') as view_col_name
+    where
+      c.relkind in ('v', 'm')
+      and n.nspname = any ($1)
+  ),
+
+  -- Primary keys
+
+  table_primary_keys as (
+    select
+      r.oid as pk_table_oid,
+      a.attnum as pk_col_position
+    from
+      pg_constraint c
+      join pg_class r on r.oid = c.conrelid
+      join pg_namespace nr on nr.oid = r.relnamespace
+      join pg_attribute a on a.attrelid = r.oid
+      , information_schema._pg_expandarray(c.conkey) as x
+    where
+      c.contype = 'p'
+      and r.relkind = 'r'
+      and nr.nspname not in ('pg_catalog', 'information_schema')
+      and not pg_is_other_temp_schema(nr.oid)
+      and a.attnum = x.x
+      and not a.attisdropped
+  ),
+
+  view_primary_keys as (
+    select
+      view_cols.view_oid as pk_table_oid,
+      view_col_position as pk_col_position
+    from
+      table_primary_keys pks
+      join view_col_rels view_cols
+        on view_cols.table_oid = pks.pk_table_oid
+  ),
+
+  primary_keys as (
+    select * from table_primary_keys
+    union all
+    select * from view_primary_keys
+  ),
+
   -- Columns
 
   columns as (
-    select distinct
-      col_table,
+    select
       a.attrelid as col_table_oid,
-      nc.nspname as col_schema,
-      c.relname as col_table_name,
+      a.attnum as col_position,
       a.attname as col_name,
       d.description as col_description,
-      a.attnum as col_position,
       pg_get_expr(ad.adbin, ad.adrelid)::text as col_default,
       not (a.attnotnull or t.typtype = 'd' and t.typnotnull) as col_nullable,
       case
@@ -164,18 +244,22 @@ with
         c.relkind in ('r', 'v', 'f')
         and pg_column_is_updatable(c.oid::regclass, a.attnum, false)
       ) col_updatable,
-      coalesce(enum_info.vals, array[]::text[]) as col_enum
+      coalesce(enum_info.vals, array[]::text[]) as col_enum,
+      pks is not null as col_is_pk
     from
       pg_attribute a
       left join pg_description d on d.objoid = a.attrelid and d.objsubid = a.attnum
       left join pg_attrdef ad on a.attrelid = ad.adrelid and a.attnum = ad.adnum
-      join pg_class c on a.attrelid = c.oid
-      join pg_namespace nc on c.relnamespace = nc.oid
-      join pg_type t on a.atttypid = t.oid
+      join pg_class c on c.oid = a.attrelid
+      join pg_namespace nc on nc.oid = c.relnamespace
+      join pg_type t on t.oid = a.atttypid
       join pg_namespace nt on t.typnamespace = nt.oid
       left join pg_type bt on t.typtype = 'd' and t.typbasetype = bt.oid
       left join pg_namespace nbt on bt.typnamespace = nbt.oid
-      join tables col_table on col_table.oid = a.attrelid
+      left join primary_keys pks
+        on
+          pks.pk_table_oid = a.attrelid
+          and pks.pk_col_position = a.attnum
       , lateral (
           select array_agg(e.enumlabel order by e.enumsortorder) as vals
           from
@@ -187,317 +271,174 @@ with
       , information_schema._pg_truetypid(a.*, t.*) truetypid
       , information_schema._pg_truetypmod(a.*, t.*) truetypmod
     where
-      not pg_is_other_temp_schema(nc.oid)
-      and a.attnum > 0
+      a.attnum > 0
       and not a.attisdropped
       and c.relkind in ('r', 'v', 'f', 'm')
-      and (
-        nc.nspname = any ($1)
-        or exists(
-            select 1
-            from
-              pg_constraint r
-            where
-              -- can we keep only ones that point to our schema?
-              r.conrelid = a.attrelid
-              and a.attnum = any(r.conkey)
-              and r.contype in ('f', 'p', 'u')
-        )
-      )
-    order by col_schema, col_position
+      and (nc.nspname = any ($1) or pks is not null)
+      and not pg_is_other_temp_schema(c.relnamespace)
+    order by
+      col_table_oid, col_position
   ),
 
+
+  table_views as (
+    select distinct
+      table_oid,
+      view_oid
+    from
+      view_col_rels cols
+  ),
 
   -- M2O relations
 
   table_table_m2o_rels as (
      select
-        conname as rel_constraint,
-        rel_table,
-        rel_f_table,
-        rel_table.oid as rel_table_oid,
-        rel_f_table.oid as rel_f_table_oid,
-        array(
-          select columns
-          from columns
-          where
-            col_table_oid = conrelid
-            and col_position = any (conkey)
-        ) as rel_columns,
-        conkey as rel_column_positions,
-        array(
-          select columns
-          from columns
-          where
-            col_table_oid = confrelid
-            and col_position = any (confkey)
-        ) as rel_f_columns,
-        confkey as rel_f_column_positions,
-        'M2O' as rel_type
+       conname as rel_constraint,
+       conrelid as rel_table_oid,
+       confrelid as rel_f_table_oid,
+       array (
+         select col_map
+         from unnest(conkey, confkey) as col_map(from_col, to_col)
+         order by from_col
+       ) as rel_col_map
      from
        pg_constraint
-       join tables rel_table on rel_table.oid = conrelid
-       join tables rel_f_table on rel_f_table.oid = confrelid
      where confrelid != 0
+     -- filter this by namespace?
      order by conrelid, conkey
-  ),
-
-
-
-  -- Source columns
-
-  -- query explanation at https://gist.github.com/steve-chavez/7ee0e6590cddafb532e5f00c46275569
-
-  view_table_columns as (
-    select
-      c.oid as view_oid,
-      substring(entry from ':resname (.*?) :') as view_col_name,
-      substring(entry from ':resorigtbl (.*?) :')::oid as table_oid,
-      substring(entry from ':resorigcol (.*?) :')::integer as col_position
-    from
-      pg_class c
-      join pg_namespace n on n.oid = c.relnamespace
-      join pg_rewrite r on r.ev_class = c.oid
-      , regexp_replace(
-          r.ev_action,
-          -- "result" appears when the subselect is used inside "case when", see
-          -- `authors_have_book_in_decade` fixture
-          -- "resno"  appears in every other case
-          case when (select pgv_num from pg_version) < 100000 then
-            ':subselect {.*?:constraintDeps <>} :location \d+} :res(no|ult)'
-          else
-            ':subselect {.*?:stmt_len 0} :location \d+} :res(no|ult)'
-          end,
-          '',
-          'g'
-        ) as x
-      , regexp_split_to_array(x, 'targetList') as target_lists
-      , lateral (
-          select
-            (regexp_split_to_array(
-              target_lists[array_upper(target_lists, 1)], ':onConflict'
-            ))[1]
-        ) last_target_list_wo_tail
-      , unnest(regexp_split_to_array(last_target_list_wo_tail::text, 'TARGETENTRY')) as entry
-    where
-      c.relkind in ('v', 'm')
-      and n.nspname = ANY ($1)
-  ),
-
-  -- Primary keys
-
-  table_primary_keys as (
-    select
-      a.attname as pk_name,
-      pk_table
-    from
-      pg_constraint c
-      join pg_class r on r.oid = c.conrelid
-      join pg_namespace nr on nr.oid = r.relnamespace
-      join tables pk_table on pk_table.oid = c.conrelid
-      join pg_attribute a on r.oid = a.attrelid
-      , information_schema._pg_expandarray(c.conkey) as x
-    where
-      c.contype = 'p'
-      and r.relkind = 'r'
-      and nr.nspname not in ('pg_catalog', 'information_schema')
-      and not pg_is_other_temp_schema(nr.oid)
-      and a.attnum = x.x
-      and not a.attisdropped
-  ),
-
-  view_primary_keys as (
-    select
-      view_col_name as pk_name,
-      pk_table
-    from
-      table_primary_keys pks
-      join view_table_columns view_cols
-        on view_cols.table_oid = (pks.pk_table).oid
-      join tables pk_table
-        on pk_table.oid = view_cols.view_oid
-  ),
-
-  primary_keys as (
-    select * from table_primary_keys
-    union all
-    select * from view_primary_keys
-  ),
-
-  table_views as (
-    select
-      table_oid,
-      view_oid,
-      array_agg(col_pairs) as col_pais
-    from
-      view_table_columns cols
-      join columns table_col
-        on
-          table_col.col_table_oid = cols.table_oid
-          and table_col.col_position = cols.col_position
-      join columns view_col
-        on
-          view_col.col_table_oid = cols.view_oid
-          and view_col.col_name = cols.view_col_name
-      , lateral (select table_col, view_col) as col_pairs
-    group by
-      cols.view_oid, cols.table_oid
   ),
 
   -- Many to one relations from views to tables
   view_table_m2o_rels as (
-     select
-        rels.rel_constraint,
-        'M2O' as rel_type,
-        rels.rel_f_table,
-        rels.rel_f_columns,
-
-        -- replace the rel_table with each view that refers to the rel_f_table
-        rel_view as rel_table,
-        array(
-          select
-            view_cols
-          from
-            unnest(rels.rel_f_column_positions) as pos
-            join view_table_columns cols
-              on
-                cols.table_oid = rels.rel_f_table_oid
-                and cols.col_position = pos
-            join columns view_cols
-              on view_cols.col_table_oid = rel_view.oid
-              and view_cols.col_name = cols.view_col_name
-        ) as rel_columns
+    select
+      rels.rel_constraint,
+      rels.rel_f_table_oid,
+      table_views.view_oid as rel_table_oid,
+      col_maps.col_map as rel_col_map
     from
-       table_table_m2o_rels rels
-       join table_views on rels.rel_f_table_oid = table_views.table_oid
-       join tables rel_view on rel_view.oid = table_views.view_oid
+      table_table_m2o_rels rels
+      join table_views on rels.rel_f_table_oid = table_views.table_oid
+      , lateral (
+          select array_agg(col_map) as col_map
+          from
+            (
+              select cols.view_col_position as from_col, col_map.to_col
+              from
+                unnest(rels.rel_col_map) as col_map(from_col smallint, to_col smallint)
+                , view_col_rels cols
+              where
+                cols.table_oid = rels.rel_f_table_oid
+                and view_oid = table_views.view_oid
+                and cols.table_col_position = col_map.to_col
+              order by from_col
+            ) col_map
+        ) as col_maps
+    where col_maps.col_map is not null
   ),
 
   table_view_m2o_rels as (
-     select
-        rels.rel_constraint,
-        'M2O' as rel_type,
-        rels.rel_table,
-        rels.rel_columns,
-
-        -- replace the rel_table with each view that refers to the rel_f_table
-        rel_f_view as rel_f_table,
-        array(
-          select
-            view_cols
-          from
-            unnest(rels.rel_column_positions) as pos
-            join view_table_columns cols
-              on
-                cols.table_oid = rels.rel_table_oid
-                and cols.col_position = pos
-            join columns view_cols
-              on view_cols.col_table_oid = rel_f_view.oid
-              and view_cols.col_name = cols.view_col_name
-        ) as rel_f_columns
+    select
+      rels.rel_constraint,
+      rels.rel_table_oid,
+      table_views.view_oid as rel_f_table_oid,
+      col_maps.col_map as rel_col_map
     from
-       table_table_m2o_rels rels
-       join table_views on rels.rel_table_oid = table_views.table_oid
-       join tables rel_f_view on rel_f_view.oid = table_views.view_oid
+      table_table_m2o_rels rels
+      join table_views on rels.rel_f_table_oid = table_views.table_oid
+      , lateral (
+          select array_agg(col_map) as col_map
+          from
+            (
+              select col_map.from_col, cols.view_col_position as to_col
+              from
+                unnest(rels.rel_col_map) as col_map(from_col smallint, to_col smallint)
+                , view_col_rels cols
+              where
+                cols.table_oid = rels.rel_table_oid
+                and view_oid = table_views.view_oid
+                and cols.table_col_position = col_map.from_col
+              order by from_col
+            ) col_map
+        ) as col_maps
+    where col_maps.col_map is not null
   ),
 
   view_view_m2o_rels as (
-     select
-        rels.rel_constraint,
-        'M2O' as rel_type,
-
-        rel_view as rel_table,
-        array(
-          select
-            view_cols
-          from
-            unnest(rels.rel_column_positions) as pos
-            join view_table_columns cols
-              on
-                cols.table_oid = rels.rel_table_oid
-                and cols.col_position = pos
-            join columns view_cols
-              on view_cols.col_table_oid = rel_view.oid
-              and view_cols.col_name = cols.view_col_name
-        ) as rel_columns,
-
-        rel_f_view as rel_f_table,
-        array(
-          select
-            view_cols
-          from
-            unnest(rels.rel_f_column_positions) as pos
-            join view_table_columns cols
-              on
-                cols.table_oid = rels.rel_table_oid
-                and cols.col_position = pos
-            join columns view_cols
-              on view_cols.col_table_oid = rel_f_view.oid
-              and view_cols.col_name = cols.view_col_name
-        ) as rel_f_columns
+    select
+      rels.rel_constraint,
+      left_views.view_oid as rel_table_oid,
+      right_views.view_oid as rel_f_table_oid,
+      col_maps.col_map as rel_col_map
     from
-       table_table_m2o_rels rels
-       join table_views on rels.rel_table_oid = table_views.table_oid
-       join tables rel_view on rel_view.oid = table_views.view_oid
-       join table_views table_f_views on rels.rel_f_table_oid = table_f_views.table_oid
-       join tables rel_f_view on rel_f_view.oid = table_views.view_oid
+      table_table_m2o_rels rels
+      join table_views left_views on left_views.table_oid = rels.rel_table_oid
+      join table_views right_views on right_views.table_oid = rels.rel_f_table_oid
+      , lateral (
+          select array_agg(col_map) as col_map
+          from
+            (
+              select
+                left_cols.view_col_position as from_col,
+                right_cols.view_col_position as to_col
+              from
+                unnest(rels.rel_col_map) as col_map(from_col smallint, to_col smallint)
+                , view_col_rels left_cols
+                , view_col_rels right_cols
+              where
+                left_cols.table_oid = rels.rel_table_oid
+                and left_cols.view_oid = left_views.view_oid
+                and left_cols.table_col_position = col_map.from_col
+                and right_cols.table_oid = rels.rel_f_table_oid
+                and right_cols.table_col_position = col_map.to_col
+                and right_cols.view_oid = right_views.view_oid
+              order by from_col
+            ) col_map
+        ) as col_maps
+    where col_maps.col_map is not null
   ),
+/*
+-- view_view_m2o_rels
+*/
 
   m2o_rels as (
-    select
-      rel_constraint::text,
-      rel_type::text,
-      rel_table::record,
-      rel_columns::record[],
-      rel_f_table::record,
-      rel_f_columns::record[]
-    from table_table_m2o_rels
+    select * from table_table_m2o_rels
     union all
-    select
-      rel_constraint::text,
-      rel_type::text,
-      rel_table::record,
-      rel_columns::record[],
-      rel_f_table::record,
-      rel_f_columns::record[]
-    from table_view_m2o_rels
+    select * from view_table_m2o_rels
     union all
-    select
-      rel_constraint::text,
-      rel_type::text,
-      rel_table::record,
-      rel_columns::record[],
-      rel_f_table::record,
-      rel_f_columns::record[]
-    from view_table_m2o_rels
+    select * from table_view_m2o_rels
     union all
-    select
-      rel_constraint::text,
-      rel_type::text,
-      rel_table::record,
-      rel_columns::record[],
-      rel_f_table::record,
-      rel_f_columns::record[]
-    from table_view_m2o_rels
+    select * from view_view_m2o_rels
   ),
 
   o2m_rels as (
     select
-      rel_constraint,
-      'O2M' as rel_type,
-      m2o_rels.rel_f_table as rel_table,
-      m2o_rels.rel_f_columns as rel_columns,
-      m2o_rels.rel_table as rel_f_table,
-      m2o_rels.rel_columns as rel_f_columns
+      rels.rel_constraint,
+      rel_f_table_oid  as rel_table_oid,
+      rel_table_oid as rel_f_table_oid,
+      col_maps.col_map as rel_col_map
     from
-      m2o_rels
+      m2o_rels rels
+      , lateral (
+          select array_agg(col_map) as col_map
+          from
+            (
+              select
+                col_map.to_col as from_col,
+                col_map.from_col as to_col
+              from
+                unnest(rels.rel_col_map) as col_map(from_col smallint, to_col smallint)
+              order by from_col
+            ) col_map
+        ) as col_maps
+    where col_maps.col_map is not null
   ),
+/*
 
   m2m_rels as (
     select
       'M2M' as rel_type,
       left_rels.rel_f_table as rel_table,
-      left_rels.rel_f_columns as rel_columns,
+      left_rels.rel;_f_columns as rel_columns,
       right_rels.rel_f_table as rel_f_table,
       right_rels.rel_f_columns as rel_f_columns,
       json_build_object(
@@ -515,28 +456,25 @@ with
       (right_rels.rel_table).oid = (left_rels.rel_table).oid
       and right_rels.rel_columns <> left_rels.rel_columns
   ),
+*/
 
   rels as (
     select
-      rel_constraint::text,
-      rel_type::text,
-      rel_table::record,
-      rel_columns::record[],
-      rel_f_table::record,
-      rel_f_columns::record[],
-      null::json as rel_junction
+      'M2O' as rel_type,
+      rel_constraint,
+      rel_table_oid,
+      rel_f_table_oid,
+      rel_col_map
     from m2o_rels
     union all
     select
-      rel_constraint::text,
-      rel_type::text,
-      rel_table::record,
-      rel_columns::record[],
-      rel_f_table::record,
-      rel_f_columns::record[],
-      null::json as rel_junction
+      'O2M' as rel_type,
+      rel_constraint,
+      rel_table_oid,
+      rel_f_table_oid,
+      rel_col_map
     from o2m_rels
-    union all
+ /*   union all
     select
       null::text as rel_constraint,
       rel_type::text,
@@ -545,7 +483,7 @@ with
       rel_f_table::record,
       rel_f_columns::record[],
       rel_junction::json
-    from m2m_rels
+    from m2m_rels*/
   )
 
   -- Main query
@@ -557,7 +495,6 @@ with
       'raw_db_tables', coalesce(tables_agg.array_agg, array[]::record[]),
       'raw_db_columns', coalesce(columns_agg.array_agg, array[]::record[]),
       'raw_db_rels', coalesce(rels_agg.array_agg, array[]::record[]),
-      'raw_db_primary_keys', coalesce(primary_keys_agg.array_agg, array[]::record[]),
       'raw_db_pg_ver', pg_version
     ) as dbstructure
   from
@@ -566,5 +503,4 @@ with
     (select array_agg(tables) from tables) as tables_agg,
     (select array_agg(columns) from columns) as columns_agg,
     (select array_agg(rels) from rels) as rels_agg,
-    (select array_agg(primary_keys) from primary_keys) as primary_keys_agg,
     pg_version
