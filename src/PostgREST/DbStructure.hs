@@ -53,20 +53,16 @@ parseDbStructure raw =
   let
     tabs = rawDbTables raw
     cols = rawDbColumns raw
-    srcCols = rawDbSourceColumns raw
-    oldSrcCols = fmap (\src -> (srcSource src, srcView src)) srcCols
-    keys = rawDbPrimaryKeys raw
-    rawProcs = rawDbProcs raw
-    procs = procsMap $ fmap loadProc rawProcs
     rels = rawDbRels raw
+    keys = rawDbPrimaryKeys raw
+    procs = procsMap $ fmap loadProc $ rawDbProcs raw
     cols' = addForeignKeys rels cols
-    keys' = addViewPrimaryKeys oldSrcCols keys
   in
   DbStructure
     { dbTables = tabs
     , dbColumns = cols'
     , dbRelations = rels
-    , dbPrimaryKeys = keys'
+    , dbPrimaryKeys = keys
     , dbProcs = procs
     , pgVersion = rawDbPgVer raw
     , dbSchemas = rawDbSchemas raw
@@ -121,27 +117,6 @@ addForeignKeys rels = map addFk
       pos <- L.elemIndex col cols
       colF <- atMay colsF pos
       return $ ForeignKey colF
-
-addViewPrimaryKeys :: [OldSourceColumn] -> [PrimaryKey] -> [PrimaryKey]
-addViewPrimaryKeys srcCols =
-  concatMap (
-    \pk ->
-      let
-        viewPks =
-          (\(_, viewCol) ->
-            PrimaryKey
-              { pkTable = colTable viewCol
-              , pkName=colName viewCol
-              }
-          )
-          <$> filter
-                (\(col, _) ->
-                  colTable col == pkTable pk && colName col == pkName pk
-                )
-                srcCols
-       in
-       pk : viewPks
-  )
 
 getPgVersion :: H.Session PgVersion
 getPgVersion = H.statement () $ H.Statement sql HE.noParams versionRow False

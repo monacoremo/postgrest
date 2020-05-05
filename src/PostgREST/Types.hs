@@ -35,7 +35,6 @@ data RawDbStructure =
         { rawDbPgVer  :: PgVersion
         , rawDbTables :: [Table]
         , rawDbColumns :: [Column]
-        , rawDbSourceColumns :: [SourceColumn]
         , rawDbPrimaryKeys :: [PrimaryKey]
         , rawDbProcs :: [RawProcDescription]
         , rawDbRels :: [Relation]
@@ -305,20 +304,6 @@ instance FromJSON Column where
 
 instance Eq Column where
   Column{colTable=t1,colName=n1} == Column{colTable=t2,colName=n2} = t1 == t2 && n1 == n2
-
--- | The source table column a view column refers to
-data SourceColumn =
-    SourceColumn
-      { srcSource :: Column
-      , srcView :: Column
-      } deriving (Show, Ord, Eq, Generic)
-
-instance FromJSON SourceColumn where
-    parseJSON =
-        Aeson.genericParseJSON aesonOptions
-
-type OldSourceColumn = (Column, ViewColumn)
-type ViewColumn = Column
 
 data PrimaryKey = PrimaryKey {
     pkTable :: Table

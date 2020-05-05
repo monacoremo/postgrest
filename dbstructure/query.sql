@@ -208,28 +208,6 @@ with
   ),
 
 
-  -- Primary keys
-
-  primary_keys as (
-      select
-        a.attname as pk_name,
-        pk_table
-      from
-        pg_constraint c
-        join pg_class r on r.oid = c.conrelid
-        join pg_namespace nr on nr.oid = r.relnamespace
-        join tables pk_table on pk_table.oid = c.conrelid
-        join pg_attribute a on r.oid = a.attrelid
-        , information_schema._pg_expandarray(c.conkey) as x
-      where
-        c.contype = 'p'
-        and r.relkind = 'r'
-        and nr.nspname not in ('pg_catalog', 'information_schema')
-        and not pg_is_other_temp_schema(nr.oid)
-        and a.attnum = x.x
-        and not a.attisdropped
-  ),
-
   -- M2O relations
 
   table_table_m2o_rels as (
@@ -270,79 +248,6 @@ with
 
   -- query explanation at https://gist.github.com/steve-chavez/7ee0e6590cddafb532e5f00c46275569
 
-  source_columns as (
-    with
-      entries as (
-        select
-          n.nspname as view_schema,
-          c.relname as view_name,
-          substring(entry from ':resname (.*?) :') as view_colum_name,
-          substring(entry from ':resorigtbl (.*?) :') as resorigtbl,
-          substring(entry from ':resorigcol (.*?) :') as resorigcol
-        from
-          pg_class c
-          join pg_namespace n on n.oid = c.relnamespace
-          join pg_rewrite r on r.ev_class = c.oid
-          , regexp_replace(
-              r.ev_action,
-              -- "result" appears when the subselect is used inside "case when", see
-              -- `authors_have_book_in_decade` fixture
-              -- "resno"  appears in every other case
-              case when (select pgv_num from pg_version) < 100000 then
-                ':subselect {.*?:constraintDeps <>} :location \d+} :res(no|ult)'
-              else
-                ':subselect {.*?:stmt_len 0} :location \d+} :res(no|ult)'
-              end,
-              '',
-              'g'
-            ) as x
-          , regexp_split_to_array(x, 'targetList') as target_lists
-          , lateral (
-              select
-                (regexp_split_to_array(
-                  target_lists[array_upper(target_lists, 1)], ':onConflict'
-                ))[1]
-            ) last_target_list_wo_tail
-          , unnest(regexp_split_to_array(last_target_list_wo_tail::text, 'TARGETENTRY')) as entry
-        where
-          c.relkind in ('v', 'm')
-          and n.nspname = ANY ($1)
-      )
-      select
-        sch.nspname as table_schema,
-        tbl.relname as table_name,
-        col.attname as table_column_name,
-        res.view_schema,
-        res.view_name,
-        res.view_colum_name,
-        source_column as src_source,
-        view_column as src_view
-      from
-        entries res
-        join pg_class tbl
-          on tbl.oid::text = res.resorigtbl
-        join pg_attribute col
-          on
-            col.attrelid = tbl.oid
-            and col.attnum::text = res.resorigcol
-        join pg_namespace sch
-          on sch.oid = tbl.relnamespace
-        join columns source_column
-          on
-            sch.nspname = source_column.col_schema
-            and tbl.relname = source_column.col_table_name
-            and col.attname = source_column.col_name
-        join columns view_column
-          on
-            res.view_schema = view_column.col_schema
-            and res.view_name = view_column.col_table_name
-            and res.view_colum_name = view_column.col_name
-        where
-          resorigtbl <> '0'
-        order by
-          view_schema, view_name, view_colum_name
-  ),
-
   view_table_columns as (
     select
       c.oid as view_oid,
@@ -377,6 +282,46 @@ with
     where
       c.relkind in ('v', 'm')
       and n.nspname = ANY ($1)
+  ),
+
+  -- Primary keys
+
+  table_primary_keys as (
+    select
+      a.attname as pk_name,
+      pk_table
+    from
+      pg_constraint c
+      join pg_class r on r.oid = c.conrelid
+      join pg_namespace nr on nr.oid = r.relnamespace
+      join tables pk_table on pk_table.oid = c.conrelid
+      join pg_attribute a on r.oid = a.attrelid
+      , information_schema._pg_expandarray(c.conkey) as x
+    where
+      c.contype = 'p'
+      and r.relkind = 'r'
+      and nr.nspname not in ('pg_catalog', 'information_schema')
+      and not pg_is_other_temp_schema(nr.oid)
+      and a.attnum = x.x
+      and not a.attisdropped
+  ),
+
+  view_primary_keys as (
+    select
+      view_col_name as pk_name,
+      pk_table
+    from
+      table_primary_keys pks
+      join view_table_columns view_cols
+        on view_cols.table_oid = (pks.pk_table).oid
+      join tables pk_table
+        on pk_table.oid = view_cols.view_oid
+  ),
+
+  primary_keys as (
+    select * from table_primary_keys
+    union all
+    select * from view_primary_keys
   ),
 
   table_views as (
@@ -613,7 +558,6 @@ with
       'raw_db_columns', coalesce(columns_agg.array_agg, array[]::record[]),
       'raw_db_rels', coalesce(rels_agg.array_agg, array[]::record[]),
       'raw_db_primary_keys', coalesce(primary_keys_agg.array_agg, array[]::record[]),
-      'raw_db_source_columns', coalesce(source_columns_agg.array_agg, array[]::record[]),
       'raw_db_pg_ver', pg_version
     ) as dbstructure
   from
@@ -623,5 +567,4 @@ with
     (select array_agg(columns) from columns) as columns_agg,
     (select array_agg(rels) from rels) as rels_agg,
     (select array_agg(primary_keys) from primary_keys) as primary_keys_agg,
-    (select array_agg(source_columns) from source_columns) as source_columns_agg,
     pg_version
