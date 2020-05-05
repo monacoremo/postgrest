@@ -38,7 +38,7 @@ data RawDbStructure =
         , rawDbSourceColumns :: [SourceColumn]
         , rawDbPrimaryKeys :: [PrimaryKey]
         , rawDbProcs :: [RawProcDescription]
-        , rawDbM2oRels :: [Relation]
+        , rawDbRels :: [Relation]
         , rawDbSchemas :: [SchemaDescription]
         }
     deriving (Show, Eq, Generic)

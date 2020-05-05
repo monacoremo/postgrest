@@ -548,24 +548,27 @@ with
       m2o_rels
   ),
 
-  m2m_junctions as (
-    -- all pairs for each table
-    select
-      left_m2o_rels as left_rel,
-      right_m2o_rels as right_rel,
-      junctions.rel_table as junction
-
-    from
-      (select rel_table from m2o_rels group by rel_table) as junctions
-      join m2o_rels left_m2o_rels on (left_m2o_rels.rel_table).oid = (junctions.rel_table).oid
-      join m2o_rels right_m2o_rels on (right_m2o_rels.rel_table).oid = (junctions.rel_table).oid
-    where
-      left_m2o_rels <> right_m2o_rels
-  ),
-
   m2m_rels as (
-    select 1
-
+    select
+      'M2M' as rel_type,
+      left_rels.rel_f_table as rel_table,
+      left_rels.rel_f_columns as rel_columns,
+      right_rels.rel_f_table as rel_f_table,
+      right_rels.rel_f_columns as rel_f_columns,
+      json_build_object(
+        'jun_table', left_rels.rel_table,
+        'jun_constraint1', left_rels.rel_constraint,
+        'jun_cols1', left_rels.rel_columns,
+        'jun_constraint2', right_rels.rel_constraint,
+        'jun_cols2', right_rels.rel_columns
+      ) as rel_junction
+    from
+      -- all combinations of rels that have the same rel_table
+      m2o_rels left_rels
+      , m2o_rels right_rels
+    where
+      (right_rels.rel_table).oid = (left_rels.rel_table).oid
+      and right_rels.rel_columns <> left_rels.rel_columns
   ),
 
   rels as (
@@ -575,7 +578,8 @@ with
       rel_table::record,
       rel_columns::record[],
       rel_f_table::record,
-      rel_f_columns::record[]
+      rel_f_columns::record[],
+      null::json as rel_junction
     from m2o_rels
     union all
     select
@@ -584,8 +588,19 @@ with
       rel_table::record,
       rel_columns::record[],
       rel_f_table::record,
-      rel_f_columns::record[]
+      rel_f_columns::record[],
+      null::json as rel_junction
     from o2m_rels
+    union all
+    select
+      null::text as rel_constraint,
+      rel_type::text,
+      rel_table::record,
+      rel_columns::record[],
+      rel_f_table::record,
+      rel_f_columns::record[],
+      rel_junction::json
+    from m2m_rels
   )
 
   -- Main query
@@ -596,7 +611,7 @@ with
       'raw_db_schemas', coalesce(schemas_agg.array_agg, array[]::record[]),
       'raw_db_tables', coalesce(tables_agg.array_agg, array[]::record[]),
       'raw_db_columns', coalesce(columns_agg.array_agg, array[]::record[]),
-      'raw_db_m2o_rels', coalesce(rels_agg.array_agg, array[]::record[]),
+      'raw_db_rels', coalesce(rels_agg.array_agg, array[]::record[]),
       'raw_db_primary_keys', coalesce(primary_keys_agg.array_agg, array[]::record[]),
       'raw_db_source_columns', coalesce(source_columns_agg.array_agg, array[]::record[]),
       'raw_db_pg_ver', pg_version
