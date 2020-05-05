@@ -30,21 +30,6 @@ import PostgREST.RangeQuery (NonnegRange)
 import Protolude            hiding (toS)
 import Protolude.Conv       (toS)
 
-data RawDbStructure =
-    RawDbStructure
-        { rawDbPgVer  :: PgVersion
-        , rawDbTables :: [Table]
-        , rawDbColumns :: [Column]
-        , rawDbPrimaryKeys :: [PrimaryKey]
-        , rawDbProcs :: [RawProcDescription]
-        , rawDbRels :: [Relation]
-        , rawDbSchemas :: [SchemaDescription]
-        }
-    deriving (Show, Eq, Generic)
-
-instance FromJSON RawDbStructure where
-    parseJSON =
-        Aeson.genericParseJSON aesonOptions
 
 data SchemaDescription =
     SchemaDescription
@@ -137,7 +122,6 @@ data DbStructure = DbStructure {
   dbTables      :: [Table]
 , dbColumns     :: [Column]
 , dbRelations   :: [Relation]
-, dbPrimaryKeys :: [PrimaryKey]
 , dbProcs       :: ProcsMap
 , pgVersion     :: PgVersion
 , dbSchemas     :: [SchemaDescription]
@@ -147,9 +131,9 @@ data DbStructure = DbStructure {
 tableCols :: DbStructure -> Schema -> TableName -> [Column]
 tableCols dbs tSchema tName = filter (\Column{colTable=Table{tableSchema=s, tableName=t}} -> s==tSchema && t==tName) $ dbColumns dbs
 
--- TODO Table could hold references to all its PrimaryKeys
 tablePKCols :: DbStructure -> Schema -> TableName -> [Text]
-tablePKCols dbs tSchema tName =  pkName <$> filter (\pk -> tSchema == (tableSchema . pkTable) pk && tName == (tableName . pkTable) pk) (dbPrimaryKeys dbs)
+tablePKCols dbs tSchema tName =
+  colName <$> filter (\col -> tSchema == (tableSchema . colTable) col && tName == (tableName . colTable) col) (dbColumns dbs)
 
 data PgArg = PgArg {
   pgaName :: Text
@@ -186,23 +170,6 @@ data ProcDescription = ProcDescription {
 , pdVolatility  :: ProcVolatility
 , pdIsAccessible :: Bool
 } deriving (Show, Eq)
-
-data RawProcDescription =
-  RawProcDescription
-    { procSchema :: Schema
-    , procName :: Text
-    , procDescription :: Maybe Text
-    , procReturnTypeQi :: QualifiedIdentifier
-    , procReturnTypeIsSetof :: Bool
-    , procReturnTypeIsComposite :: Bool
-    , procVolatility :: ProcVolatility
-    , procIsAccessible :: Bool
-    , procArgs :: [PgArg]
-    } deriving (Show, Eq, Generic)
-
-instance FromJSON RawProcDescription where
-    parseJSON =
-        Aeson.genericParseJSON aesonOptions
 
 -- Order by least number of args in the case of overloaded functions
 instance Ord ProcDescription where
@@ -296,6 +263,7 @@ data Column =
     , colDefault     :: Maybe Text
     , colEnum        :: [Text]
     , colFK          :: Maybe ForeignKey
+    , colIsPrimaryKey :: Bool
     } deriving (Show, Ord, Generic)
 
 instance FromJSON Column where
@@ -304,15 +272,6 @@ instance FromJSON Column where
 
 instance Eq Column where
   Column{colTable=t1,colName=n1} == Column{colTable=t2,colName=n2} = t1 == t2 && n1 == n2
-
-data PrimaryKey = PrimaryKey {
-    pkTable :: Table
-  , pkName  :: Text
-} deriving (Show, Eq, Generic)
-
-instance FromJSON PrimaryKey where
-    parseJSON =
-        Aeson.genericParseJSON aesonOptions
 
 data OrderDirection = OrderAsc | OrderDesc deriving (Eq)
 instance Show OrderDirection where

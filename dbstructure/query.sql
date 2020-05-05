@@ -85,7 +85,7 @@ with
 
   tables as (
     select
-      c.oid,
+      c.oid as table_oid,
       n.nspname as table_schema,
       c.relname as table_name,
       d.description as table_description,
@@ -245,7 +245,7 @@ with
         and pg_column_is_updatable(c.oid::regclass, a.attnum, false)
       ) col_updatable,
       coalesce(enum_info.vals, array[]::text[]) as col_enum,
-      pks is not null as col_is_pk
+      pks is not null as col_is_primary_key
     from
       pg_attribute a
       left join pg_description d on d.objoid = a.attrelid and d.objsubid = a.attnum
@@ -494,6 +494,7 @@ with
       'raw_db_schemas', coalesce(schemas_agg.array_agg, array[]::record[]),
       'raw_db_tables', coalesce(tables_agg.array_agg, array[]::record[]),
       'raw_db_columns', coalesce(columns_agg.array_agg, array[]::record[]),
+      --'raw_db_m2o_rels', coalesce(m2o_rels_agg.array_agg, array[]::record[]),
       'raw_db_rels', coalesce(rels_agg.array_agg, array[]::record[]),
       'raw_db_pg_ver', pg_version
     ) as dbstructure
@@ -502,5 +503,6 @@ with
     (select array_agg(schemas) from schemas) schemas_agg,
     (select array_agg(tables) from tables) as tables_agg,
     (select array_agg(columns) from columns) as columns_agg,
+    (select array_agg(m2o_rels) from m2o_rels) as m2o_rels_agg,
     (select array_agg(rels) from rels) as rels_agg,
     pg_version

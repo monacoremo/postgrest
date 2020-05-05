@@ -15,6 +15,8 @@ These queries are executed once at startup or when PostgREST is reloaded.
 {-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE TemplateHaskell       #-}
 {-# LANGUAGE TypeSynonymInstances  #-}
+{-# LANGUAGE DeriveAnyClass        #-}
+{-# LANGUAGE DeriveGeneric         #-}
 
 module PostgREST.DbStructure (
   getDbStructure
@@ -26,6 +28,7 @@ module PostgREST.DbStructure (
 
 import           Control.Exception
 import qualified Data.Aeson                    as Aeson
+import           Data.Aeson (FromJSON)
 import qualified Data.FileEmbed                as FileEmbed
 import qualified Data.HashMap.Strict           as M
 import qualified Data.List                     as L
@@ -35,8 +38,9 @@ import qualified Hasql.Encoders                as HE
 import qualified Hasql.Session                 as H
 import qualified Hasql.Statement               as H
 import qualified Hasql.Transaction             as HT
-import           PostgREST.Private.Common
-import           PostgREST.Types
+import qualified PostgREST.Private.Common as Common
+import           PostgREST.Types hiding (Table(..), Column(..), Relation(..))
+import qualified PostgREST.Types as Types
 import           Protolude
 
 getDbStructure :: [Schema] -> PgVersion -> HT.Transaction DbStructure
@@ -45,32 +49,104 @@ getDbStructure schemas _ = do
   -- fully qualified name(schema.name) of every db object.
   HT.sql "set local schema ''"
   raw <- getRawDbStructure schemas
-
   return $ parseDbStructure raw
 
 parseDbStructure :: RawDbStructure -> DbStructure
 parseDbStructure raw =
   let
-    tabs = rawDbTables raw
-    cols = rawDbColumns raw
-    rels = rawDbRels raw
-    keys = rawDbPrimaryKeys raw
+    tabs = fmap loadTable $ rawDbTables raw
+
+    tabsMap :: Tables
+    tabsMap =
+      M.fromList . map (\table -> (tableOid table, table)) $ rawDbTables raw
+
+    cols = catMaybes . fmap (loadColumn tabsMap) $ rawDbColumns raw
+
+    colsMap :: Columns
+    colsMap =
+      M.fromList . map (\col -> ((colTableOid col, colPosition col), col)) $ rawDbColumns raw
+
+    rels = catMaybes . fmap (loadRelation tabsMap colsMap) $ rawDbRels raw
+
     procs = procsMap $ fmap loadProc $ rawDbProcs raw
+
     cols' = addForeignKeys rels cols
   in
   DbStructure
     { dbTables = tabs
     , dbColumns = cols'
     , dbRelations = rels
-    , dbPrimaryKeys = keys
     , dbProcs = procs
     , pgVersion = rawDbPgVer raw
     , dbSchemas = rawDbSchemas raw
     }
 
-accessibleTables :: DbStructure -> [Table]
+loadTable :: RawTable -> Types.Table
+loadTable raw =
+  Types.Table
+    { Types.tableSchema = tableSchema raw
+    , Types.tableName = tableName raw
+    , Types.tableDescription = tableDescription raw
+    , Types.tableInsertable = tableInsertable raw
+    , Types.tableIsAccessible = tableIsAccessible raw
+    }
+
+loadColumn :: Tables -> RawColumn -> Maybe Types.Column
+loadColumn tabsMap col =
+  loadColumn' col <$> M.lookup (colTableOid col) tabsMap
+
+loadColumn' :: RawColumn -> RawTable -> Types.Column
+loadColumn' col tab =
+  Types.Column
+    { Types.colTable = loadTable tab
+    , Types.colPosition = colPosition col
+    , Types.colName = colName col
+    , Types.colDescription = colDescription col
+    , Types.colNullable = colNullable col
+    , Types.colType = colType col
+    , Types.colUpdatable = colUpdatable col
+    , Types.colMaxLen = colMaxLen col
+    , Types.colPrecision = colPrecision col
+    , Types.colDefault = colDefault col
+    , Types.colEnum = colEnum col
+    , Types.colFK = colFK col
+    , Types.colIsPrimaryKey = colIsPrimaryKey col
+    }
+
+type Tables = M.HashMap Oid RawTable
+
+type Columns = M.HashMap (Oid, ColPosition) RawColumn
+
+loadRelation :: Tables -> Columns -> RawRelation -> Maybe Types.Relation
+loadRelation tabs cols raw =
+  loadRelation' raw cols
+    <$> M.lookup (relTableOid raw) tabs
+    <*> M.lookup (relFTableOid raw) tabs
+
+loadRelation' :: RawRelation -> Columns -> RawTable -> RawTable -> Types.Relation
+loadRelation' raw cols tab fTab =
+  let
+    lookupCol :: RawTable -> ColPosition -> Maybe RawColumn
+    lookupCol t pos =
+        M.lookup (tableOid t, pos) cols
+  in
+  Types.Relation
+    { Types.relTable = loadTable tab
+    , Types.relFTable = loadTable fTab
+    , Types.relConstraint = relConstraint raw
+    , Types.relType = relType raw
+    , Types.relJunction = Nothing
+    , Types.relColumns =
+        fmap (\c -> loadColumn' c tab) . catMaybes .
+          fmap ((lookupCol tab) . fromCol) $ relColMap raw
+    , Types.relFColumns =
+        fmap (\c -> loadColumn' c fTab) . catMaybes .
+          fmap ((lookupCol fTab) . toCol) $ relColMap raw
+    }
+
+accessibleTables :: DbStructure -> [Types.Table]
 accessibleTables structure =
-   filter tableIsAccessible (dbTables structure)
+   filter Types.tableIsAccessible (Types.dbTables structure)
 
 accessibleProcs :: DbStructure -> ProcsMap
 accessibleProcs structure =
@@ -106,23 +182,31 @@ parseRetType qi isSetOf isComposite
   where
     pgType = if isComposite then Composite qi else Scalar qi
 
-addForeignKeys :: [Relation] -> [Column] -> [Column]
+
+addForeignKeys :: [Types.Relation] -> [Types.Column] -> [Types.Column]
 addForeignKeys rels = map addFk
   where
-    addFk col = col { colFK = fk col }
-    fk col = find (lookupFn col) rels >>= relToFk col
-    lookupFn :: Column -> Relation -> Bool
-    lookupFn c Relation{relColumns=cs, relType=rty} = c `elem` cs && rty==M2O
-    relToFk col Relation{relColumns=cols, relFColumns=colsF} = do
-      pos <- L.elemIndex col cols
-      colF <- atMay colsF pos
-      return $ ForeignKey colF
+    addFk col =
+      col { Types.colFK = fk col }
+
+    fk col =
+      find (lookupFn col) rels >>= relToFk col
+
+    lookupFn :: Types.Column -> Types.Relation -> Bool
+    lookupFn c Types.Relation{Types.relColumns=cs, Types.relType=rty} =
+      c `elem` cs && rty == M2O
+
+    relToFk col Types.Relation{Types.relColumns=cols, Types.relFColumns=colsF} =
+      do
+        pos <- L.elemIndex col cols
+        colF <- atMay colsF pos
+        return $ ForeignKey colF
 
 getPgVersion :: H.Session PgVersion
 getPgVersion = H.statement () $ H.Statement sql HE.noParams versionRow False
   where
     sql = "SELECT current_setting('server_version_num')::integer, current_setting('server_version')"
-    versionRow = HD.singleRow $ PgVersion <$> column HD.int4 <*> column HD.text
+    versionRow = HD.singleRow $ PgVersion <$> Common.column HD.int4 <*> Common.column HD.text
 
 
 
@@ -131,14 +215,14 @@ getPgVersion = H.statement () $ H.Statement sql HE.noParams versionRow False
 
 getRawDbStructure :: [Schema] -> HT.Transaction RawDbStructure
 getRawDbStructure schemas =
-    do
-        value <- HT.statement schemas rawDbStructureQuery
+  do
+    value <- HT.statement schemas rawDbStructureQuery
 
-        case Aeson.fromJSON value of
-          Aeson.Success m ->
-              return m
-          Aeson.Error err ->
-              throw $ DbStructureDecodeException err
+    case Aeson.fromJSON value of
+      Aeson.Success m ->
+        return m
+      Aeson.Error err ->
+        throw $ DbStructureDecodeException err
 
 data DbStructureDecodeException =
     DbStructureDecodeException String
@@ -153,6 +237,117 @@ rawDbStructureQuery =
       $(FileEmbed.embedFile "dbstructure/query.sql")
 
     decode =
-      HD.singleRow $ column HD.json
+      HD.singleRow $ Common.column HD.json
   in
-  H.Statement sql (arrayParam HE.text) decode True
+  H.Statement sql (Common.arrayParam HE.text) decode True
+
+
+-- Types
+
+type Oid = String
+
+type ColPosition = Int32
+
+data RawDbStructure =
+  RawDbStructure
+    { rawDbPgVer  :: PgVersion
+    , rawDbTables :: [RawTable]
+    , rawDbColumns :: [RawColumn]
+    , rawDbProcs :: [RawProcDescription]
+    , rawDbRels :: [RawRelation]
+    , rawDbSchemas :: [SchemaDescription]
+    }
+    deriving (Show, Eq, Generic)
+
+instance FromJSON RawDbStructure where
+  parseJSON =
+    Aeson.genericParseJSON aesonOptions
+
+data RawProcDescription =
+  RawProcDescription
+    { procSchema :: Schema
+    , procName :: Text
+    , procDescription :: Maybe Text
+    , procReturnTypeQi :: QualifiedIdentifier
+    , procReturnTypeIsSetof :: Bool
+    , procReturnTypeIsComposite :: Bool
+    , procVolatility :: ProcVolatility
+    , procIsAccessible :: Bool
+    , procArgs :: [PgArg]
+    } deriving (Show, Eq, Generic)
+
+instance FromJSON RawProcDescription where
+  parseJSON =
+    Aeson.genericParseJSON aesonOptions
+
+data RawTable =
+  RawTable
+    { tableOid :: Oid
+    , tableSchema :: Schema
+    , tableName :: TableName
+    , tableDescription :: Maybe Text
+    , tableInsertable :: Bool
+    , tableIsAccessible :: Bool
+    } deriving (Show, Eq, Generic)
+
+instance FromJSON RawTable where
+  parseJSON =
+    Aeson.genericParseJSON aesonOptions
+
+data RawColumn =
+  RawColumn
+    { colTableOid :: Oid
+    , colPosition :: ColPosition
+    , colName :: FieldName
+    , colDescription :: Maybe Text
+    , colNullable :: Bool
+    , colType :: Text
+    , colUpdatable :: Bool
+    , colMaxLen :: Maybe Int32
+    , colPrecision :: Maybe Int32
+    , colDefault :: Maybe Text
+    , colEnum :: [Text]
+    , colFK :: Maybe ForeignKey
+    , colIsPrimaryKey :: Bool
+    } deriving (Show, Eq, Generic)
+
+instance FromJSON RawColumn where
+  parseJSON =
+    Aeson.genericParseJSON aesonOptions
+
+data RawRelation =
+  RawRelation
+    { relTableOid :: Oid
+    , relFTableOid :: Oid
+    , relConstraint :: Maybe ConstraintName
+    , relColMap :: [ColMapping]
+    , relType :: Cardinality
+    , relJunction :: Maybe RawJunction -- ^ Junction for M2M Cardinality
+    } deriving (Show, Eq, Generic)
+
+instance FromJSON RawRelation where
+  parseJSON =
+    Aeson.genericParseJSON aesonOptions
+
+data ColMapping =
+  ColMapping
+    { fromCol :: Int32
+    , toCol :: Int32
+    } deriving (Show, Eq, Generic)
+
+instance FromJSON ColMapping where
+  parseJSON =
+    Aeson.genericParseJSON aesonOptions
+
+-- | Junction table on an M2M relationship
+data RawJunction =
+  Junction
+    { junTableOid :: Integer
+    , junConstraint1 :: Maybe ConstraintName
+    , junConstraint2 :: Maybe ConstraintName
+    , junColMap :: [ColMapping]
+    } deriving (Show, Eq, Generic)
+
+instance FromJSON RawJunction where
+  parseJSON =
+    Aeson.genericParseJSON aesonOptions
