@@ -29,7 +29,7 @@ with
 
   -- Procedures
 
-  procs as (
+ procs as (
     select
       pn.nspname as proc_schema,
       p.proname as proc_name,
@@ -91,7 +91,10 @@ with
       d.description as table_description,
       (
         c.relkind in ('r', 'v', 'f')
-        and (pg_relation_is_updatable(c.oid::regclass, false) & 8) = 8
+
+        -- NOTE: The following check is very expensice (+50 ms on large schema)
+        and pg_relation_is_updatable(c.oid, true) & 8 = 8
+
         -- The function `pg_relation_is_updateable` returns a bitmask where 8
         -- corresponds to `1 << CMD_INSERT` in the PostgreSQL source code, i.e.
         -- it's possible to insert into the relation.
@@ -118,10 +121,8 @@ with
       left join pg_catalog.pg_description as d
         on d.objoid = c.oid and d.objsubid = 0
     where
-      c.relkind IN ('v','r','m','f')
-      and n.nspname NOT IN ('pg_catalog', 'information_schema')
-    order by
-      table_schema, table_name
+      c.relkind in ('v','r','m','f')
+      and n.nspname not in ('pg_catalog', 'information_schema')
   ),
 
 
@@ -183,7 +184,7 @@ with
       join pg_class r on r.oid = c.conrelid
       join pg_namespace nr on nr.oid = r.relnamespace
       join pg_attribute a on a.attrelid = r.oid
-      , information_schema._pg_expandarray(c.conkey) as x
+      , unnest(c.conkey) as x
     where
       c.contype = 'p'
       and r.relkind = 'r'
@@ -193,7 +194,7 @@ with
       and not a.attisdropped
   ),
 
-  view_primary_keys as (
+  /*view_primary_keys as (
     select
       view_cols.view_oid as pk_table_oid,
       view_col_position as pk_col_position
@@ -201,18 +202,18 @@ with
       table_primary_keys pks
       join view_col_rels view_cols
         on view_cols.table_oid = pks.pk_table_oid
-  ),
+  ),*/
 
   primary_keys as (
     select * from table_primary_keys
-    union all
-    select * from view_primary_keys
+  --  union all
+  --  select * from view_primary_keys
   ),
 
   -- Columns
 
   columns as (
-    select
+    select distinct
       a.attrelid as col_table_oid,
       a.attnum as col_position,
       a.attname as col_name,
@@ -279,7 +280,7 @@ with
       and not pg_is_other_temp_schema(c.relnamespace)
     order by
       col_table_oid, col_position
-  ),
+/*  ),
 
 
   table_views as (
@@ -504,18 +505,19 @@ with
       rel_col_map,
       rel_junction
     from m2m_rels
+*/
   )
 
   -- Main query
 
   select
     json_build_object(
-      'raw_db_procs', coalesce(procs_agg.array_agg, array[]::record[]),
+      --'raw_db_procs', coalesce(procs_agg.array_agg, array[]::record[]),
       'raw_db_schemas', coalesce(schemas_agg.array_agg, array[]::record[]),
-      'raw_db_tables', coalesce(tables_agg.array_agg, array[]::record[]),
-      'raw_db_columns', coalesce(columns_agg.array_agg, array[]::record[]),
+      --'raw_db_tables', coalesce(tables_agg.array_agg, array[]::record[]),
+      --'raw_db_columns', coalesce(columns_agg.array_agg, array[]::record[]),
       --'raw_db_m2o_rels', coalesce(m2o_rels_agg.array_agg, array[]::record[]),
-      'raw_db_rels', coalesce(rels_agg.array_agg, array[]::record[]),
+      --'raw_db_rels', coalesce(rels_agg.array_agg, array[]::record[]),
       'raw_db_pg_ver', pg_version
     ) as dbstructure
   from
@@ -523,6 +525,6 @@ with
     (select array_agg(schemas) from schemas) schemas_agg,
     (select array_agg(tables) from tables) as tables_agg,
     (select array_agg(columns) from columns) as columns_agg,
-    (select array_agg(m2o_rels) from m2o_rels) as m2o_rels_agg,
-    (select array_agg(rels) from rels) as rels_agg,
+   -- (select array_agg(m2o_rels) from m2o_rels) as m2o_rels_agg,
+   -- (select array_agg(rels) from rels) as rels_agg,
     pg_version
