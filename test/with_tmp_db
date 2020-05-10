@@ -56,7 +56,7 @@ mkdir -p "$tmpdir"/{db,socket}
 
 export PGDATA="$tmpdir/db"
 export PGHOST="$tmpdir/socket"
-export PGUSER=postgrest_test_authenticator
+export PGUSER=postgres
 export PGDATABASE=postgres
 export DB_URI="postgresql://$PGDATABASE?host=$PGHOST&user=$PGUSER"
 export POSTGREST_TEST_CONNECTION="$DB_URI"
