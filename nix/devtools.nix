@@ -1,5 +1,6 @@
 { writeShellScriptBin
 , buildEnv
+, entr
 , git
 , hlint
 , nixpkgs-fmt
@@ -18,11 +19,12 @@ let
         ${nixpkgs-fmt}/bin/nixpkgs-fmt "$rootdir" > /dev/null 2> /dev/null
 
         # Format Haskell files
-        ${silver-searcher}/bin/ag -l -g '\.l?hs$' "$rootdir" \
+        ${silver-searcher}/bin/ag -l -g '\.l?hs$' . "$rootdir" \
           | xargs ${stylish-haskell}/bin/stylish-haskell -i
       '';
 
-  check =
+  # Script to check whether any uncommited changes result from postgrest-style
+  styleCheck =
     writeShellScriptBin "postgrest-style-check"
       ''
         set -euo pipefail
@@ -31,6 +33,7 @@ let
 
         ${git}/bin/git diff-index --exit-code HEAD -- '*.hs' '*.lhs' '*.nix'
       '';
+
   lint =
     writeShellScriptBin "postgrest-lint"
       ''
@@ -42,8 +45,20 @@ let
         ${silver-searcher}/bin/ag -l -g '\.l?hs$' "$rootdir" \
           | xargs ${hlint}/bin/hlint -X QuasiQuotes -X NoPatternSynonyms
       '';
+
+  watch =
+    writeShellScriptBin "postgrest-watch"
+      ''
+        set -euo pipefail
+
+        rootdir="$(${git}/bin/git rev-parse --show-toplevel)"
+
+        while true; do
+          ${silver-searcher}/bin/ag -l . "$rootdir" | ${entr}/bin/entr -rd "$@"
+        done
+      '';
 in
 buildEnv {
   name = "postgrest-devtools";
-  paths = [ style check lint ];
+  paths = [ style styleCheck lint watch ];
 }
