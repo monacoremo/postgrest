@@ -43,14 +43,14 @@ let
     import nixpkgs { inherit overlays; };
 
   postgresqlVersions =
-    {
-      postgresql-13 = pkgs.postgresql_13;
-      postgresql-12 = pkgs.postgresql_12;
-      postgresql-11 = pkgs.postgresql_11;
-      postgresql-10 = pkgs.postgresql_10;
-      "postgresql-9.6" = pkgs.postgresql_9_6;
-      "postgresql-9.5" = pkgs.postgresql_9_5;
-    };
+    [
+      { name = "postgresql-13"; postgresql = pkgs.postgresql_13; }
+      { name = "postgresql-12"; postgresql = pkgs.postgresql_12; }
+      { name = "postgresql-11"; postgresql = pkgs.postgresql_11; }
+      { name = "postgresql-10"; postgresql = pkgs.postgresql_10; }
+      { name = "postgresql-9.6"; postgresql = pkgs.postgresql_9_6; }
+      { name = "postgresql-9.5"; postgresql = pkgs.postgresql_9_5; }
+    ];
 
   patches =
     pkgs.callPackage nix/patches { };

@@ -42,6 +42,8 @@ let
 
         EOF
 
+        trap 'echo "Failed on ${postgresql.name}"' exit
+
         ${withTmpDb postgresql} ${cabal-install}/bin/cabal v2-test -f FailOnWarn \
           --test-show-detail=direct
 
@@ -55,8 +57,8 @@ let
   # Create a `testSpec` for each PostgreSQL version that we want to test
   # against.
   testSpecVersions =
-    lib.mapAttrsToList
-      (name: postgresql:
+    builtins.map
+      ({name, postgresql}:
         (testSpec "postgrest-test-spec-${name}" postgresql).bin)
       postgresqlVersions;
 
@@ -67,9 +69,7 @@ let
         map (test: "${test}/bin/${test.name}") testSpecVersions;
     in
     checkedShellScript "postgrest-test-spec-all"
-      ''
-        ${lib.concatStringsSep "\n" testRunners}
-      '';
+      (lib.concatStringsSep "\n" testRunners);
 
   testIO =
     name: postgresql:
