@@ -58,7 +58,7 @@ let
   # against.
   testSpecVersions =
     builtins.map
-      ({name, postgresql}:
+      ({ name, postgresql }:
         (testSpec "postgrest-test-spec-${name}" postgresql).bin)
       postgresqlVersions;
 
