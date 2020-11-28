@@ -1,4 +1,5 @@
 { buildEnv
+, cabal-install
 , checkedShellScript
 , entr
 , git
@@ -56,8 +57,31 @@ let
         nix-store -qR --include-outputs "$(nix-instantiate)" \
           | cachix push postgrest
       '';
+
+  build =
+    checkedShellScript "postgrest-build"
+      ''exec ${cabal-install}/bin/cabal v2-build "$@"'';
+
+  run =
+    checkedShellScript "postgrest-run"
+      ''exec ${cabal-install}/bin/cabal v2-run postgrest -- "$@"'';
+
+  clean =
+    checkedShellScript "postgrest-run"
+      ''
+        ${cabal-install}/bin/cabal v2-clean
+      '';
 in
 buildEnv {
   name = "postgrest-devtools";
-  paths = [ style.bin styleCheck.bin lint.bin watch.bin pushCachix.bin ];
+  paths = [
+    style.bin
+    styleCheck.bin
+    lint.bin
+    watch.bin
+    pushCachix.bin
+    build.bin
+    run.bin
+    clean.bin
+  ];
 }
