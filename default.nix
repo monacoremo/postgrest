@@ -114,7 +114,7 @@ rec {
 
   # Development tools, including linting and styling scripts.
   devtools =
-    pkgs.callPackage nix/devtools.nix { };
+    pkgs.callPackage nix/devtools.nix { inherit tests; };
 
   # Scripts for publishing new releases.
   release =

@@ -7,6 +7,7 @@
 , nixpkgs-fmt
 , silver-searcher
 , stylish-haskell
+, tests
 }:
 let
   style =
@@ -67,9 +68,16 @@ let
       ''exec ${cabal-install}/bin/cabal v2-run postgrest -- "$@"'';
 
   clean =
-    checkedShellScript "postgrest-run"
+    checkedShellScript "postgrest-clean"
       ''
         ${cabal-install}/bin/cabal v2-clean
+      '';
+
+  check =
+    checkedShellScript "postgrest-check"
+      ''
+        ${style}
+        ${tests}/bin/postgrest-test-spec-all
       '';
 in
 buildEnv {
@@ -83,5 +91,6 @@ buildEnv {
     build.bin
     run.bin
     clean.bin
+    check.bin
   ];
 }
