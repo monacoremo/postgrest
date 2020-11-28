@@ -25,7 +25,7 @@ let
   styleCheck =
     checkedShellScript "postgrest-style-check"
       ''
-        ${style}/bin/${style.name}
+        ${style}
 
         ${git}/bin/git diff-index --exit-code HEAD -- '*.hs' '*.lhs' '*.nix'
       '';
@@ -49,8 +49,15 @@ let
           ${silver-searcher}/bin/ag -l . "$rootdir" | ${entr}/bin/entr -rd "$@"
         done
       '';
+
+  pushCachix =
+    checkedShellScript "postgrest-push-cachix"
+      ''
+        nix-store -qR --include-outputs "$(nix-instantiate)" \
+          | cachix push postgrest
+      '';
 in
 buildEnv {
   name = "postgrest-devtools";
-  paths = [ style.bin styleCheck.bin lint.bin watch.bin ];
+  paths = [ style.bin styleCheck.bin lint.bin watch.bin pushCachix.bin ];
 }
