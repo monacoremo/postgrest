@@ -31,9 +31,10 @@ let
 
   overlays =
     [
-      allOverlays.postgresql-default
-      allOverlays.gitignore
+      allOverlays.checked-shell-script
       allOverlays.ghr
+      allOverlays.gitignore
+      allOverlays.postgresql-default
       (allOverlays.haskell-packages { inherit compiler; })
     ];
 

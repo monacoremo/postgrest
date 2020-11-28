@@ -1,5 +1,5 @@
-{ writeShellScriptBin
-, buildEnv
+{ buildEnv
+, checkedShellScript
 , entr
 , git
 , hlint
@@ -9,10 +9,8 @@
 }:
 let
   style =
-    writeShellScriptBin "postgrest-style"
+    checkedShellScript "postgrest-style"
       ''
-        set -euo pipefail
-
         rootdir="$(${git}/bin/git rev-parse --show-toplevel)"
 
         # Format Nix files
@@ -25,20 +23,16 @@ let
 
   # Script to check whether any uncommited changes result from postgrest-style
   styleCheck =
-    writeShellScriptBin "postgrest-style-check"
+    checkedShellScript "postgrest-style-check"
       ''
-        set -euo pipefail
-
         ${style}/bin/${style.name}
 
         ${git}/bin/git diff-index --exit-code HEAD -- '*.hs' '*.lhs' '*.nix'
       '';
 
   lint =
-    writeShellScriptBin "postgrest-lint"
+    checkedShellScript "postgrest-lint"
       ''
-        set -euo pipefail
-
         rootdir="$(${git}/bin/git rev-parse --show-toplevel)"
 
         # Lint Haskell files
@@ -47,10 +41,8 @@ let
       '';
 
   watch =
-    writeShellScriptBin "postgrest-watch"
+    checkedShellScript "postgrest-watch"
       ''
-        set -euo pipefail
-
         rootdir="$(${git}/bin/git rev-parse --show-toplevel)"
 
         while true; do
@@ -60,5 +52,5 @@ let
 in
 buildEnv {
   name = "postgrest-devtools";
-  paths = [ style styleCheck lint watch ];
+  paths = [ style.bin styleCheck.bin lint.bin watch.bin ];
 }
