@@ -35,13 +35,11 @@ import qualified Network.Wai as Wai
 import qualified PostgREST.ApiRequest as ApiRequest
 import qualified PostgREST.Auth as Auth
 import qualified PostgREST.Config as Config
-import PostgREST.DbRequestBuilder (mutateRequest, readRequest,
-                                   returningCols)
-import PostgREST.DbStructure
-import PostgREST.Error            (PgError (..), SimpleError (..),
-                                   errorResponseFor, singularityError)
-import PostgREST.Middleware
-import PostgREST.OpenAPI
+import qualified PostgREST.DbRequestBuilder as DbRequestBuilder
+import qualified PostgREST.DbStructure as DbStructure
+import qualified PostgREST.Error as Error
+import qualified PostgREST.Middleware as Middleware
+import qualified PostgREST.OpenAPI as OpenAPI
 import PostgREST.QueryBuilder     (limitedQuery, mutateRequestToQuery,
                                    readRequestToCountQuery,
                                    readRequestToQuery,
@@ -65,13 +63,13 @@ postgrest ::
   -> IO ()
   -> Wai.Application
 postgrest logLev refConf refDbStructure pool getTime connWorker =
-  pgrstMiddleware logLev $ \ req respond -> do
+  Middleware.pgrstMiddleware logLev $ \ req respond -> do
     time <- getTime
     body <- Wai.strictRequestBody req
     maybeDbStructure <- readIORef refDbStructure
     conf <- readIORef refConf
     case maybeDbStructure of
-      Nothing -> respond . errorResponseFor $ ConnectionLostError
+      Nothing -> respond . Error.errorResponseFor $ Error.ConnectionLostError
       Just dbStructure -> do
         response <- do
           let
@@ -83,7 +81,7 @@ postgrest logLev refConf refDbStructure pool getTime connWorker =
                 req
                 body
           case apiReq of
-            Left err -> return . errorResponseFor $ err
+            Left err -> return . Error.errorResponseFor $ err
             Right apiRequest -> do
               -- The jwt must be checked before touching the db.
               attempt <-
@@ -94,7 +92,7 @@ postgrest logLev refConf refDbStructure pool getTime connWorker =
                   time
                   (rightToMaybe $ Config.configJwtRoleClaimKey conf)
               case Auth.jwtClaims attempt of
-                Left errJwt -> return . errorResponseFor $ errJwt
+                Left errJwt -> return . Error.errorResponseFor $ errJwt
                 Right claims -> do
                   let
                     authed = Auth.containsRole claims
@@ -106,9 +104,9 @@ postgrest logLev refConf refDbStructure pool getTime connWorker =
                       | otherwise       = identity
                     handleReq = do
                       when (shouldRollback || (Config.configDbTxRollbackAll conf && not shouldCommit)) Hasql.condemn
-                      Wai.mapResponseHeaders preferenceApplied <$> runPgLocals conf claims (app dbStructure conf) apiRequest
+                      Wai.mapResponseHeaders preferenceApplied <$> Middleware.runPgLocals conf claims (app dbStructure conf) apiRequest
                   dbResp <- Hasql.use pool $ Hasql.transaction Hasql.ReadCommitted (txMode apiRequest) handleReq
-                  return $ either (errorResponseFor . PgError authed) identity dbResp
+                  return $ either (Error.errorResponseFor . Error.PgError authed) identity dbResp
         -- Launch the connWorker when the connection is down. The postgrest function can respond successfully(with a stale schema cache) before the connWorker is done.
         when (Wai.responseStatus response == HTTP.status503) connWorker
         respond response
@@ -159,7 +157,7 @@ app dbStructure conf apiRequest =
               let (tableTotal, queryTotal, _ , body, gucHeaders, gucStatus) = row
                   gucs =  (,) <$> gucHeaders <*> gucStatus
               case gucs of
-                Left err -> return $ errorResponseFor err
+                Left err -> return $ Error.errorResponseFor err
                 Right (ghdrs, gstatus) -> do
                   total <- if | plannedCount   -> Hasql.statement () explStm
                               | estimatedCount -> if tableTotal > (fromIntegral <$> maxRows)
@@ -188,7 +186,7 @@ app dbStructure conf apiRequest =
                       if headersOnly then mempty else toS body
                   return $
                     if contentType == Types.CTSingularJSON && queryTotal /= 1 then
-                      errorResponseFor . singularityError $ queryTotal
+                      Error.errorResponseFor . Error.singularityError $ queryTotal
                     else
                       Wai.responseLBS status headers rBody
 
@@ -214,7 +212,7 @@ app dbStructure conf apiRequest =
               let (_, queryTotal, fields, body, gucHeaders, gucStatus) = row
                   gucs =  (,) <$> gucHeaders <*> gucStatus
               case gucs of
-                Left err -> return $ errorResponseFor err
+                Left err -> return $ Error.errorResponseFor err
                 Right (ghdrs, gstatus) -> do
                   let
                     (ctHeaders, rBody) =
@@ -241,7 +239,7 @@ app dbStructure conf apiRequest =
                   if contentType == Types.CTSingularJSON && queryTotal /= 1 then
                     do
                       Hasql.condemn
-                      return . errorResponseFor . singularityError $ queryTotal
+                      return . Error.errorResponseFor . Error.singularityError $ queryTotal
                   else
                     return $ Wai.responseLBS status headers rBody
 
@@ -267,7 +265,7 @@ app dbStructure conf apiRequest =
                 gucs =  (,) <$> gucHeaders <*> gucStatus
               case gucs of
                 Left err ->
-                  return $ errorResponseFor err
+                  return $ Error.errorResponseFor err
                 Right (ghdrs, gstatus) -> do
                   let
                     updateIsNoOp =
@@ -304,7 +302,7 @@ app dbStructure conf apiRequest =
                   if contentType == Types.CTSingularJSON && queryTotal /= 1 then
                     do
                       Hasql.condemn
-                      return . errorResponseFor . singularityError $ queryTotal
+                      return . Error.errorResponseFor . Error.singularityError $ queryTotal
                   else
                     return $ Wai.responseLBS status headers rBody
 
@@ -313,7 +311,7 @@ app dbStructure conf apiRequest =
             Left errorResponse -> return errorResponse
             Right (sq, mq) ->
               if topLevelRange /= allRange
-                then return . errorResponseFor $ PutRangeNotAllowedError
+                then return . Error.errorResponseFor $ Error.PutRangeNotAllowedError
               else do
                 row <-
                   Hasql.statement mempty $
@@ -330,7 +328,7 @@ app dbStructure conf apiRequest =
                 let (_, queryTotal, _, body, gucHeaders, gucStatus) = row
                     gucs =  (,) <$> gucHeaders <*> gucStatus
                 case gucs of
-                  Left err -> return $ errorResponseFor err
+                  Left err -> return $ Error.errorResponseFor err
                   Right (ghdrs, gstatus) -> do
                     let
                       headers =
@@ -351,7 +349,7 @@ app dbStructure conf apiRequest =
                     if queryTotal /= 1 then
                       do
                         Hasql.condemn
-                        return . errorResponseFor $ PutMatchingPkError
+                        return . Error.errorResponseFor $ Error.PutMatchingPkError
                     else
                       return $ Wai.responseLBS status headers rBody
 
@@ -367,7 +365,7 @@ app dbStructure conf apiRequest =
               let (_, queryTotal, _, body, gucHeaders, gucStatus) = row
                   gucs =  (,) <$> gucHeaders <*> gucStatus
               case gucs of
-                Left err -> return $ errorResponseFor err
+                Left err -> return $ Error.errorResponseFor err
                 Right (ghdrs, gstatus) -> do
                   let
                     defStatus =
@@ -389,7 +387,7 @@ app dbStructure conf apiRequest =
                   if contentType == Types.CTSingularJSON && queryTotal /= 1 then
                     do
                       Hasql.condemn
-                      return . errorResponseFor . singularityError $ queryTotal
+                      return . Error.errorResponseFor . Error.singularityError $ queryTotal
                   else
                     return $ Wai.responseLBS status headers rBody
 
@@ -417,7 +415,7 @@ app dbStructure conf apiRequest =
               let (tableTotal, queryTotal, body, gucHeaders, gucStatus) = row
                   gucs =  (,) <$> gucHeaders <*> gucStatus
               case gucs of
-                Left err -> return $ errorResponseFor err
+                Left err -> return $ Error.errorResponseFor err
                 Right (ghdrs, gstatus) -> do
                   let (rangeStatus, contentRange) = rangeStatusHeader topLevelRange queryTotal tableTotal
                       status = fromMaybe rangeStatus gstatus
@@ -428,14 +426,14 @@ app dbStructure conf apiRequest =
                   if contentType == Types.CTSingularJSON && queryTotal /= 1
                     then do
                       Hasql.condemn
-                      return . errorResponseFor . singularityError $ queryTotal
+                      return . Error.errorResponseFor . Error.singularityError $ queryTotal
                     else
                       return $ Wai.responseLBS status headers rBody
 
         (ApiRequest.ActionInspect headersOnly, ApiRequest.TargetDefaultSpec tSchema) -> do
           let host = Config.configServerHost conf
               port = toInteger $ Config.configServerPort conf
-              proxy = pickProxy $ toS <$> Config.configOpenApiServerProxyUri conf
+              proxy = OpenAPI.pickProxy $ toS <$> Config.configOpenApiServerProxyUri conf
 
               uri Nothing = ("http", host, port, "/")
               uri (Just Types.Proxy { Types.proxyScheme = s, Types.proxyHost = h, Types.proxyPort = p, Types.proxyPath = b }) = (s, h, p, b)
@@ -451,12 +449,12 @@ app dbStructure conf apiRequest =
                       (t, Types.tableCols dbStructure s tn, Types.tablePKCols dbStructure s tn)
                   )
 
-              encodeApi ti sd procs = encodeOpenAPI (concat $ HashMap.elems procs) (toTableInfo ti) uri' sd $ Types.dbPrimaryKeys dbStructure
+              encodeApi ti sd procs = OpenAPI.encodeOpenAPI (concat $ HashMap.elems procs) (toTableInfo ti) uri' sd $ Types.dbPrimaryKeys dbStructure
 
           body <- encodeApi <$>
-            Hasql.statement tSchema accessibleTables <*>
-            Hasql.statement tSchema schemaDescription <*>
-            Hasql.statement tSchema accessibleProcs
+            Hasql.statement tSchema DbStructure.accessibleTables <*>
+            Hasql.statement tSchema DbStructure.schemaDescription <*>
+            Hasql.statement tSchema DbStructure.accessibleProcs
           return $
             Wai.responseLBS
               HTTP.status200
@@ -491,10 +489,10 @@ app dbStructure conf apiRequest =
 
         readSqlParts s t =
           let
-            readReq = readRequest s t maxRows (Types.dbRelations dbStructure) apiRequest
+            readReq = DbRequestBuilder.readRequest s t maxRows (Types.dbRelations dbStructure) apiRequest
 
             returnings :: Types.ReadRequest -> Either Wai.Response [Types.FieldName]
-            returnings rr = Right (returningCols rr [])
+            returnings rr = Right (DbRequestBuilder.returningCols rr [])
           in
           (,,,) <$>
           (readRequestToQuery <$> readReq) <*>
@@ -504,8 +502,8 @@ app dbStructure conf apiRequest =
 
         mutateSqlParts s t =
           let
-            readReq = readRequest s t maxRows (Types.dbRelations dbStructure) apiRequest
-            mutReq = mutateRequest s t apiRequest (Types.tablePKCols dbStructure s t) =<< readReq
+            readReq = DbRequestBuilder.readRequest s t maxRows (Types.dbRelations dbStructure) apiRequest
+            mutReq = DbRequestBuilder.mutateRequest s t apiRequest (Types.tablePKCols dbStructure s t) =<< readReq
           in
           (,) <$>
           (readRequestToQuery <$> readReq) <*>
@@ -542,7 +540,7 @@ responseContentTypeOrError accepts rawContentTypes action target =
           [Types.CTApplicationJSON, Types.CTSingularJSON, Types.CTTextCSV]
     serves sProduces cAccepts =
       case ApiRequest.mutuallyAgreeable sProduces cAccepts of
-        Nothing -> Left . errorResponseFor . ContentTypeError . map Types.toMime $ cAccepts
+        Nothing -> Left . Error.errorResponseFor . Error.ContentTypeError . map Types.toMime $ cAccepts
         Just ct -> Right ct
 
 {-
@@ -564,7 +562,7 @@ binaryField ct rawContentTypes isScalarProc readReq
       let fieldName = headMay fldNames in
       if length fldNames == 1 && fieldName /= Just "*"
         then Right fieldName
-        else Left . errorResponseFor $ BinaryFieldError ct
+        else Left . Error.errorResponseFor $ Error.BinaryFieldError ct
   | otherwise = Right Nothing
   where
     fldNames = Types.fstFieldNames readReq
