@@ -40,16 +40,9 @@ import qualified PostgREST.DbStructure as DbStructure
 import qualified PostgREST.Error as Error
 import qualified PostgREST.Middleware as Middleware
 import qualified PostgREST.OpenAPI as OpenAPI
-import PostgREST.QueryBuilder     (limitedQuery, mutateRequestToQuery,
-                                   readRequestToCountQuery,
-                                   readRequestToQuery,
-                                   requestToCallProcQuery)
-import PostgREST.RangeQuery       (allRange, contentRangeH,
-                                   rangeStatusHeader)
-import PostgREST.Statements       (callProcStatement,
-                                   createExplainStatement,
-                                   createReadStatement,
-                                   createWriteStatement)
+import qualified PostgREST.QueryBuilder as QueryBuilder
+import qualified PostgREST.RangeQuery as RangeQuery
+import qualified PostgREST.Statements as Statements
 import qualified PostgREST.Types as Types
 import Protolude                  hiding (Proxy, intercalate, toS)
 import Protolude.Conv             (toS)
@@ -147,12 +140,29 @@ app dbStructure conf apiRequest =
           case readSqlParts tSchema tName of
             Left errorResponse -> return errorResponse
             Right (q, cq, bField, _) -> do
-              let cQuery = if estimatedCount
-                             then limitedQuery cq ((+ 1) <$> maxRows) -- LIMIT maxRows + 1 so we can determine below that maxRows was surpassed
-                             else cq
-                  stm = createReadStatement q cQuery (contentType == Types.CTSingularJSON) shouldCount
-                        (contentType == Types.CTTextCSV) bField pgVer prepared
-                  explStm = createExplainStatement cq prepared
+              let
+                cQuery =
+                  if estimatedCount then
+                    -- LIMIT maxRows + 1 so we can determine below that maxRows
+                    -- was surpassed
+                    QueryBuilder.limitedQuery cq ((+ 1) <$> maxRows)
+                  else
+                    cq
+
+                stm =
+                  Statements.createReadStatement
+                    q
+                    cQuery
+                    (contentType == Types.CTSingularJSON)
+                    shouldCount
+                    (contentType == Types.CTTextCSV)
+                    bField
+                    pgVer
+                    prepared
+
+                explStm =
+                  Statements.createExplainStatement cq prepared
+
               row <- Hasql.statement mempty stm
               let (tableTotal, queryTotal, _ , body, gucHeaders, gucStatus) = row
                   gucs =  (,) <$> gucHeaders <*> gucStatus
@@ -167,7 +177,7 @@ app dbStructure conf apiRequest =
                               | otherwise      -> pure tableTotal
                   let
                     (rangeStatus, contentRange) =
-                      rangeStatusHeader topLevelRange queryTotal total
+                      RangeQuery.rangeStatusHeader topLevelRange queryTotal total
 
                     status =
                       fromMaybe rangeStatus gstatus
@@ -198,7 +208,7 @@ app dbStructure conf apiRequest =
                 pkCols =
                   Types.tablePKCols dbStructure tSchema tName
                 stm =
-                  createWriteStatement
+                  Statements.createWriteStatement
                     sq
                     mq
                     (contentType == Types.CTSingularJSON)
@@ -230,7 +240,7 @@ app dbStructure conf apiRequest =
                           if null fields
                             then Nothing
                             else Just $ locationH tName fields
-                        , Just $ contentRangeH 1 0 $ if shouldCount then Just queryTotal else Nothing
+                        , Just $ RangeQuery.contentRangeH 1 0 $ if shouldCount then Just queryTotal else Nothing
                         , if null pkCols && isNothing (ApiRequest.iOnConflict apiRequest)
                             then Nothing
                             else (\x -> ("Preference-Applied", BS.pack (show x))) <$> ApiRequest.iPreferResolution apiRequest
@@ -249,7 +259,7 @@ app dbStructure conf apiRequest =
             Right (sq, mq) -> do
               row <-
                 Hasql.statement mempty $
-                  createWriteStatement
+                  Statements.createWriteStatement
                     sq
                     mq
                     (contentType == Types.CTSingularJSON)
@@ -283,7 +293,7 @@ app dbStructure conf apiRequest =
                       fromMaybe defStatus gstatus
 
                     contentRangeHeader =
-                      contentRangeH
+                      RangeQuery.contentRangeH
                         0
                         (queryTotal - 1)
                         (if shouldCount then Just queryTotal else Nothing)
@@ -310,12 +320,12 @@ app dbStructure conf apiRequest =
           case mutateSqlParts tSchema tName of
             Left errorResponse -> return errorResponse
             Right (sq, mq) ->
-              if topLevelRange /= allRange
-                then return . Error.errorResponseFor $ Error.PutRangeNotAllowedError
+              if topLevelRange /= RangeQuery.allRange then
+                return . Error.errorResponseFor $ Error.PutRangeNotAllowedError
               else do
                 row <-
                   Hasql.statement mempty $
-                    createWriteStatement
+                    Statements.createWriteStatement
                       sq
                       mq
                       (contentType == Types.CTSingularJSON)
@@ -357,10 +367,17 @@ app dbStructure conf apiRequest =
           case mutateSqlParts tSchema tName of
             Left errorResponse -> return errorResponse
             Right (sq, mq) -> do
-              let stm = createWriteStatement sq mq
+              let
+                stm =
+                  Statements.createWriteStatement
+                    sq
+                    mq
                     (contentType == Types.CTSingularJSON) False
                     (contentType == Types.CTTextCSV)
-                    (ApiRequest.iPreferRepresentation apiRequest) [] pgVer prepared
+                    (ApiRequest.iPreferRepresentation apiRequest)
+                    []
+                    pgVer
+                    prepared
               row <- Hasql.statement mempty stm
               let (_, queryTotal, _, body, gucHeaders, gucStatus) = row
                   gucs =  (,) <$> gucHeaders <*> gucStatus
@@ -373,17 +390,25 @@ app dbStructure conf apiRequest =
                         HTTP.status200
                       else
                         HTTP.status204
-                    status = fromMaybe defStatus gstatus
-                    contentRangeHeader = contentRangeH 1 0 $ if shouldCount then Just queryTotal else Nothing
+
+                    status =
+                      fromMaybe defStatus gstatus
+
+                    contentRangeHeader =
+                      RangeQuery.contentRangeH 1 0 $
+                        if shouldCount then Just queryTotal else Nothing
+
                     (ctHeaders, rBody) =
                       if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
                         ([Just $ Types.toHeader contentType, profileH], toS body)
                       else
                         ([], mempty)
+
                     headers =
                       Types.addHeadersIfNotIncluded
                         (catMaybes ctHeaders ++ [contentRangeHeader])
                         (Types.unwrapGucHeader <$> ghdrs)
+
                   if contentType == Types.CTSingularJSON && queryTotal /= 1 then
                     do
                       Hasql.condemn
@@ -406,23 +431,53 @@ app dbStructure conf apiRequest =
             Left errorResponse -> return errorResponse
             Right (q, cq, bField, returning) -> do
               let
-                preferParams = ApiRequest.iPreferParameters apiRequest
-                pq = requestToCallProcQuery (Types.QualifiedIdentifier pdSchema pdName) (Types.specifiedProcArgs (ApiRequest.iColumns apiRequest) proc)
-                       (ApiRequest.iPayload apiRequest) returnsScalar preferParams returning
-                stm = callProcStatement returnsScalar returnsSingle pq q cq shouldCount (contentType == Types.CTSingularJSON)
-                        (contentType == Types.CTTextCSV) (preferParams == Just Types.MultipleObjects) bField pgVer prepared
+                preferParams =
+                  ApiRequest.iPreferParameters apiRequest
+
+                pq =
+                  QueryBuilder.requestToCallProcQuery
+                    (Types.QualifiedIdentifier pdSchema pdName)
+                    (Types.specifiedProcArgs (ApiRequest.iColumns apiRequest) proc)
+                    (ApiRequest.iPayload apiRequest)
+                    returnsScalar
+                    preferParams
+                    returning
+
+                stm =
+                  Statements.callProcStatement
+                    returnsScalar
+                    returnsSingle
+                    pq
+                    q
+                    cq
+                    shouldCount
+                    (contentType == Types.CTSingularJSON)
+                    (contentType == Types.CTTextCSV)
+                    (preferParams == Just Types.MultipleObjects)
+                    bField
+                    pgVer
+                    prepared
+
               row <- Hasql.statement mempty stm
               let (tableTotal, queryTotal, body, gucHeaders, gucStatus) = row
                   gucs =  (,) <$> gucHeaders <*> gucStatus
               case gucs of
                 Left err -> return $ Error.errorResponseFor err
                 Right (ghdrs, gstatus) -> do
-                  let (rangeStatus, contentRange) = rangeStatusHeader topLevelRange queryTotal tableTotal
-                      status = fromMaybe rangeStatus gstatus
-                      headers = Types.addHeadersIfNotIncluded
+                  let
+                    (rangeStatus, contentRange) =
+                      RangeQuery.rangeStatusHeader topLevelRange queryTotal tableTotal
+
+                    status =
+                      fromMaybe rangeStatus gstatus
+
+                    headers =
+                      Types.addHeadersIfNotIncluded
                         (catMaybes [Just $ Types.toHeader contentType, Just contentRange, profileH])
                         (Types.unwrapGucHeader <$> ghdrs)
-                      rBody = if invMethod == ApiRequest.InvHead then mempty else toS body
+
+                    rBody =
+                      if invMethod == ApiRequest.InvHead then mempty else toS body
                   if contentType == Types.CTSingularJSON && queryTotal /= 1
                     then do
                       Hasql.condemn
@@ -495,8 +550,8 @@ app dbStructure conf apiRequest =
             returnings rr = Right (DbRequestBuilder.returningCols rr [])
           in
           (,,,) <$>
-          (readRequestToQuery <$> readReq) <*>
-          (readRequestToCountQuery <$> readReq) <*>
+          (QueryBuilder.readRequestToQuery <$> readReq) <*>
+          (QueryBuilder.readRequestToCountQuery <$> readReq) <*>
           (binaryField contentType rawContentTypes returnsScalar =<< readReq) <*>
           (returnings =<< readReq)
 
@@ -506,8 +561,8 @@ app dbStructure conf apiRequest =
             mutReq = DbRequestBuilder.mutateRequest s t apiRequest (Types.tablePKCols dbStructure s t) =<< readReq
           in
           (,) <$>
-          (readRequestToQuery <$> readReq) <*>
-          (mutateRequestToQuery <$> mutReq)
+          (QueryBuilder.readRequestToQuery <$> readReq) <*>
+          (QueryBuilder.mutateRequestToQuery <$> mutReq)
 
 responseContentTypeOrError ::
   [Types.ContentType]
