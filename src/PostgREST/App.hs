@@ -432,16 +432,16 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
       handleSingleUpsert conf dbStructure apiRequest contentType tSchema tName
 
     (ApiRequest.ActionDelete, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tName)) ->
-      deleteResponse conf dbStructure contentType apiRequest tSchema tName
+      handleDelete conf dbStructure contentType apiRequest tSchema tName
 
     (ApiRequest.ActionInfo, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tTable)) ->
-      return $ infoResponse dbStructure tSchema tTable
+      return $ handleInfo dbStructure tSchema tTable
 
     (ApiRequest.ActionInvoke invMethod, ApiRequest.TargetProc proc _) ->
-      invokeResponse conf dbStructure invMethod rawContentTypes contentType apiRequest proc
+      handleInvoke conf dbStructure invMethod rawContentTypes contentType apiRequest proc
 
     (ApiRequest.ActionInspect headersOnly, ApiRequest.TargetDefaultSpec tSchema) ->
-      openApiResponse conf dbStructure apiRequest headersOnly tSchema
+      handleOpenApi conf dbStructure apiRequest headersOnly tSchema
 
     _ -> return notFound
 
@@ -505,7 +505,7 @@ handleSingleUpsert conf dbStructure apiRequest contentType tSchema tName =
               return $ Wai.responseLBS status headers rBody
 
 
-deleteResponse
+handleDelete
   :: Config.AppConfig
   -> Types.DbStructure
   -> Types.ContentType
@@ -513,7 +513,7 @@ deleteResponse
   -> Text
   -> Text
   -> Hasql.Transaction Wai.Response
-deleteResponse conf dbStructure contentType apiRequest tSchema tName =
+handleDelete conf dbStructure contentType apiRequest tSchema tName =
   case mutateSqlParts tSchema tName conf dbStructure apiRequest of
     Left errorResponse -> return errorResponse
     Right (sq, mq) -> do
@@ -567,8 +567,8 @@ deleteResponse conf dbStructure contentType apiRequest tSchema tName =
             return $ Wai.responseLBS status headers rBody
 
 
-infoResponse :: Types.DbStructure -> Text -> Text -> Wai.Response
-infoResponse dbStructure tSchema tTable =
+handleInfo :: Types.DbStructure -> Text -> Text -> Wai.Response
+handleInfo dbStructure tSchema tTable =
   let
     mTable =
       find
@@ -594,7 +594,7 @@ infoResponse dbStructure tSchema tTable =
       Wai.responseLBS HTTP.status200 [allOrigins, allowH] mempty
 
 
-invokeResponse
+handleInvoke
   :: Config.AppConfig
   -> Types.DbStructure
   -> ApiRequest.InvokeMethod
@@ -603,7 +603,7 @@ invokeResponse
   -> ApiRequest.ApiRequest
   -> Types.ProcDescription
   -> Hasql.Transaction Wai.Response
-invokeResponse conf dbStructure invMethod rawContentTypes contentType apiRequest proc =
+handleInvoke conf dbStructure invMethod rawContentTypes contentType apiRequest proc =
       let
         pdName =
           Types.pdName proc
@@ -679,14 +679,16 @@ invokeResponse conf dbStructure invMethod rawContentTypes contentType apiRequest
                   return . Error.errorResponseFor . Error.singularityError $ queryTotal
                 else
                   return $ Wai.responseLBS status headers rBody
-openApiResponse
+
+
+handleOpenApi
   :: Config.AppConfig
   -> Types.DbStructure
   -> ApiRequest.ApiRequest
   -> Bool
   -> Types.Schema
   -> Hasql.Transaction Wai.Response
-openApiResponse conf dbStructure apiRequest headersOnly tSchema =
+handleOpenApi conf dbStructure apiRequest headersOnly tSchema =
   let
     host =
       Config.configServerHost conf
