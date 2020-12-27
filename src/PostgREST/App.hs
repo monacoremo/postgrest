@@ -22,12 +22,14 @@ import Network.HTTP.Types.URI (renderSimpleQuery)
 
 import qualified Data.ByteString.Char8 as Char8ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
+import qualified Data.Ranged.Ranges as Ranges
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.List as List (union)
 import qualified Data.Set as Set
 import qualified Hasql.Pool as Hasql
 import qualified Hasql.Transaction as Hasql
 import qualified Hasql.Transaction.Sessions as Hasql
+import qualified Hasql.DynamicStatements.Snippet as Hasql
 import qualified Network.HTTP.Types.Header as HTTP
 import qualified Network.HTTP.Types.Status as HTTP
 import qualified Network.Wai as Wai
@@ -216,15 +218,15 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
   case (ApiRequest.iAction apiRequest, ApiRequest.iTarget apiRequest) of
 
     (ApiRequest.ActionRead headersOnly, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tName)) ->
-      case readSqlParts tSchema tName of
+      case readSqlParts tSchema tName conf dbStructure apiRequest rawContentTypes contentType of
         Left errorResponse -> return errorResponse
         Right (q, cq, bField, _) -> do
           let
             cQuery =
-              if estimatedCount then
+              if estimatedCount apiRequest then
                 -- LIMIT maxRows + 1 so we can determine below that maxRows
                 -- was surpassed
-                QueryBuilder.limitedQuery cq ((+ 1) <$> maxRows)
+                QueryBuilder.limitedQuery cq ((+ 1) <$> Config.configDbMaxRows conf)
               else
                 cq
 
@@ -233,14 +235,14 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                 q
                 cQuery
                 (contentType == Types.CTSingularJSON)
-                shouldCount
+                (shouldCount apiRequest)
                 (contentType == Types.CTTextCSV)
                 bField
-                pgVer
-                prepared
+                (Types.pgVersion dbStructure)
+                (Config.configDbPreparedStatements conf)
 
             explStm =
-              Statements.createExplainStatement cq prepared
+              Statements.createExplainStatement cq (Config.configDbPreparedStatements conf)
 
           row <- Hasql.statement mempty stm
           let
@@ -254,9 +256,9 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
               return $ Error.errorResponseFor err
             Right (ghdrs, gstatus) -> do
               total <-
-                if | plannedCount   -> Hasql.statement () explStm
-                   | estimatedCount ->
-                       if tableTotal > (fromIntegral <$> maxRows) then
+                if | plannedCount apiRequest  -> Hasql.statement () explStm
+                   | estimatedCount apiRequest ->
+                       if tableTotal > (fromIntegral <$> Config.configDbMaxRows conf) then
                          do
                            estTotal <- Hasql.statement () explStm
                            pure $
@@ -269,7 +271,7 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                    | otherwise      -> pure tableTotal
               let
                 (rangeStatus, contentRange) =
-                  RangeQuery.rangeStatusHeader topLevelRange queryTotal total
+                  RangeQuery.rangeStatusHeader (topLevelRange apiRequest) queryTotal total
 
                 status =
                   fromMaybe rangeStatus gstatus
@@ -282,7 +284,7 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                           contentLocationH
                             tName
                             (ApiRequest.iCanonicalQS apiRequest)
-                      , profileH
+                      , (profileH apiRequest)
                       ]
                     )
                     (Types.unwrapGucHeader <$> ghdrs)
@@ -296,7 +298,7 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                   Wai.responseLBS status headers rBody
 
     (ApiRequest.ActionCreate, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tName)) ->
-      case mutateSqlParts tSchema tName of
+      case mutateSqlParts tSchema tName conf dbStructure apiRequest of
         Left errorResponse -> return errorResponse
         Right (sq, mq) -> do
           let
@@ -311,8 +313,8 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                 (contentType == Types.CTTextCSV)
                 (ApiRequest.iPreferRepresentation apiRequest)
                 pkCols
-                pgVer
-                prepared
+                (Types.pgVersion dbStructure)
+                (Config.configDbPreparedStatements conf)
           row <- Hasql.statement mempty stm
           let
             (_, queryTotal, fields, body, gucHeaders, gucStatus) =
@@ -326,7 +328,7 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
               let
                 (ctHeaders, rBody) =
                   if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
-                    ([Just $ Types.toHeader contentType, profileH], toS body)
+                    ([Just $ Types.toHeader contentType, profileH apiRequest], toS body)
                   else
                     ([], mempty)
 
@@ -344,7 +346,7 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                           RangeQuery.contentRangeH
                             1
                             0
-                            (if shouldCount then Just queryTotal else Nothing)
+                            (if shouldCount apiRequest then Just queryTotal else Nothing)
                       , if null pkCols && isNothing (ApiRequest.iOnConflict apiRequest) then
                           Nothing
                         else
@@ -361,7 +363,7 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                 return $ Wai.responseLBS status headers rBody
 
     (ApiRequest.ActionUpdate, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tName)) ->
-      case mutateSqlParts tSchema tName of
+      case mutateSqlParts tSchema tName conf dbStructure apiRequest of
         Left errorResponse ->
           return errorResponse
 
@@ -376,8 +378,8 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                 (contentType == Types.CTTextCSV)
                 (ApiRequest.iPreferRepresentation apiRequest)
                 []
-                pgVer
-                prepared
+                (Types.pgVersion dbStructure)
+                (Config.configDbPreparedStatements conf)
 
           let
             (_, queryTotal, _, body, gucHeaders, gucStatus) = row
@@ -406,11 +408,11 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                   RangeQuery.contentRangeH
                     0
                     (queryTotal - 1)
-                    (if shouldCount then Just queryTotal else Nothing)
+                    (if shouldCount apiRequest then Just queryTotal else Nothing)
 
                 (ctHeaders, rBody) =
                   if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
-                    ([Just $ Types.toHeader contentType, profileH], toS body)
+                    ([Just $ Types.toHeader contentType, profileH apiRequest], toS body)
                   else
                     ([], mempty)
 
@@ -427,10 +429,10 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                 return $ Wai.responseLBS status headers rBody
 
     (ApiRequest.ActionSingleUpsert, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tName)) ->
-      case mutateSqlParts tSchema tName of
+      case mutateSqlParts tSchema tName conf dbStructure apiRequest of
         Left errorResponse -> return errorResponse
         Right (sq, mq) ->
-          if topLevelRange /= RangeQuery.allRange then
+          if topLevelRange apiRequest /= RangeQuery.allRange then
             return . Error.errorResponseFor $ Error.PutRangeNotAllowedError
           else do
             row <-
@@ -443,8 +445,8 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                   (contentType == Types.CTTextCSV)
                   (ApiRequest.iPreferRepresentation apiRequest)
                   []
-                  pgVer
-                  prepared
+                  (Types.pgVersion dbStructure)
+                  (Config.configDbPreparedStatements conf)
             let (_, queryTotal, _, body, gucHeaders, gucStatus) = row
                 gucs =  (,) <$> gucHeaders <*> gucStatus
             case gucs of
@@ -453,7 +455,7 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                 let
                   headers =
                     Types.addHeadersIfNotIncluded
-                      (catMaybes [Just $ Types.toHeader contentType, profileH])
+                      (catMaybes [Just $ Types.toHeader contentType, profileH apiRequest])
                       (Types.unwrapGucHeader <$> ghdrs)
 
                   (defStatus, rBody) =
@@ -477,7 +479,7 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                   return $ Wai.responseLBS status headers rBody
 
     (ApiRequest.ActionDelete, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tName)) ->
-      case mutateSqlParts tSchema tName of
+      case mutateSqlParts tSchema tName conf dbStructure apiRequest of
         Left errorResponse -> return errorResponse
         Right (sq, mq) -> do
           let
@@ -489,8 +491,8 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                 (contentType == Types.CTTextCSV)
                 (ApiRequest.iPreferRepresentation apiRequest)
                 []
-                pgVer
-                prepared
+                (Types.pgVersion dbStructure)
+                (Config.configDbPreparedStatements conf)
           row <- Hasql.statement mempty stm
           let (_, queryTotal, _, body, gucHeaders, gucStatus) = row
               gucs =  (,) <$> gucHeaders <*> gucStatus
@@ -509,11 +511,11 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
 
                 contentRangeHeader =
                   RangeQuery.contentRangeH 1 0 $
-                    if shouldCount then Just queryTotal else Nothing
+                    if shouldCount apiRequest then Just queryTotal else Nothing
 
                 (ctHeaders, rBody) =
                   if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
-                    ([Just $ Types.toHeader contentType, profileH], toS body)
+                    ([Just $ Types.toHeader contentType, profileH apiRequest], toS body)
                   else
                     ([], mempty)
 
@@ -555,7 +557,7 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
 
     (ApiRequest.ActionInvoke invMethod, ApiRequest.TargetProc proc@Types.ProcDescription{Types.pdSchema, Types.pdName} _) ->
       let tName = fromMaybe pdName $ Types.procTableName proc in
-      case readSqlParts pdSchema tName of
+      case readSqlParts pdSchema tName conf dbStructure apiRequest rawContentTypes contentType of
         Left errorResponse -> return errorResponse
         Right (q, cq, bField, returning) -> do
           let
@@ -567,24 +569,24 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                 (Types.QualifiedIdentifier pdSchema pdName)
                 (Types.specifiedProcArgs (ApiRequest.iColumns apiRequest) proc)
                 (ApiRequest.iPayload apiRequest)
-                returnsScalar
+                (returnsScalar apiRequest)
                 preferParams
                 returning
 
             stm =
               Statements.callProcStatement
-                returnsScalar
-                returnsSingle
+                (returnsScalar apiRequest)
+                (returnsSingle apiRequest)
                 pq
                 q
                 cq
-                shouldCount
+                (shouldCount apiRequest)
                 (contentType == Types.CTSingularJSON)
                 (contentType == Types.CTTextCSV)
                 (preferParams == Just Types.MultipleObjects)
                 bField
-                pgVer
-                prepared
+                (Types.pgVersion dbStructure)
+                (Config.configDbPreparedStatements conf)
 
           row <- Hasql.statement mempty stm
 
@@ -602,14 +604,14 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
             Right (ghdrs, gstatus) -> do
               let
                 (rangeStatus, contentRange) =
-                  RangeQuery.rangeStatusHeader topLevelRange queryTotal tableTotal
+                  RangeQuery.rangeStatusHeader (topLevelRange apiRequest) queryTotal tableTotal
 
                 status =
                   fromMaybe rangeStatus gstatus
 
                 headers =
                   Types.addHeadersIfNotIncluded
-                    (catMaybes [Just $ Types.toHeader contentType, Just contentRange, profileH])
+                    (catMaybes [Just $ Types.toHeader contentType, Just contentRange, profileH apiRequest])
                     (Types.unwrapGucHeader <$> ghdrs)
 
                 rBody =
@@ -669,97 +671,126 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
       return $
         Wai.responseLBS
           HTTP.status200
-          (catMaybes [Just $ Types.toHeader Types.CTOpenAPI, profileH])
+          (catMaybes [Just $ Types.toHeader Types.CTOpenAPI, profileH apiRequest])
           (if headersOnly then mempty else toS body)
 
     _ -> return notFound
 
-  where
-    notFound =
-      Wai.responseLBS HTTP.status404 [] ""
 
-    maxRows =
-      Config.configDbMaxRows conf
+notFound :: Wai.Response
+notFound =
+  Wai.responseLBS HTTP.status404 [] ""
 
-    prepared =
-      Config.configDbPreparedStatements conf
 
-    exactCount =
-      ApiRequest.iPreferCount apiRequest == Just Types.ExactCount
+exactCount :: ApiRequest.ApiRequest -> Bool
+exactCount apiRequest =
+  ApiRequest.iPreferCount apiRequest == Just Types.ExactCount
 
-    estimatedCount =
-      ApiRequest.iPreferCount apiRequest == Just Types.EstimatedCount
 
-    plannedCount =
-      ApiRequest.iPreferCount apiRequest == Just Types.PlannedCount
+estimatedCount :: ApiRequest.ApiRequest -> Bool
+estimatedCount apiRequest =
+  ApiRequest.iPreferCount apiRequest == Just Types.EstimatedCount
 
-    shouldCount =
-      exactCount || estimatedCount
 
-    topLevelRange =
-      ApiRequest.iTopLevelRange apiRequest
+plannedCount :: ApiRequest.ApiRequest -> Bool
+plannedCount apiRequest =
+  ApiRequest.iPreferCount apiRequest == Just Types.PlannedCount
 
-    returnsScalar =
-      case ApiRequest.iTarget apiRequest of
-        ApiRequest.TargetProc proc _ ->
-          Types.procReturnsScalar proc
-        _ ->
-          False
 
-    returnsSingle =
-      case ApiRequest.iTarget apiRequest of
-        ApiRequest.TargetProc proc _ ->
-          Types.procReturnsSingle proc
-        _ ->
-          False
+shouldCount :: ApiRequest.ApiRequest -> Bool
+shouldCount apiRequest =
+  exactCount apiRequest || estimatedCount apiRequest
 
-    pgVer =
-      Types.pgVersion dbStructure
 
-    profileH =
-      contentProfileH <$> ApiRequest.iProfile apiRequest
+topLevelRange :: ApiRequest.ApiRequest -> Ranges.Range Integer
+topLevelRange apiRequest =
+  ApiRequest.iTopLevelRange apiRequest
 
-    readSqlParts s t =
-      let
-        readReq =
-          DbRequestBuilder.readRequest
-            s
-            t
-            maxRows
-            (Types.dbRelations dbStructure)
-            apiRequest
 
-        returnings :: Types.ReadRequest -> Either Wai.Response [Types.FieldName]
-        returnings rr =
-          Right (DbRequestBuilder.returningCols rr [])
-      in
-      (,,,) <$>
-        (QueryBuilder.readRequestToQuery <$> readReq) <*>
-        (QueryBuilder.readRequestToCountQuery <$> readReq) <*>
-        (binaryField contentType rawContentTypes returnsScalar =<< readReq) <*>
-        (returnings =<< readReq)
+returnsScalar :: ApiRequest.ApiRequest -> Bool
+returnsScalar apiRequest =
+  case ApiRequest.iTarget apiRequest of
+    ApiRequest.TargetProc proc _ ->
+      Types.procReturnsScalar proc
+    _ ->
+      False
 
-    mutateSqlParts s t =
-      let
-        readReq =
-          DbRequestBuilder.readRequest
-            s
-            t
-            maxRows
-            (Types.dbRelations dbStructure)
-            apiRequest
 
-        mutReq =
-          DbRequestBuilder.mutateRequest
-            s
-            t
-            apiRequest
-            (Types.tablePKCols dbStructure s t)
-            =<< readReq
-      in
-      (,) <$>
-        (QueryBuilder.readRequestToQuery <$> readReq) <*>
-        (QueryBuilder.mutateRequestToQuery <$> mutReq)
+returnsSingle :: ApiRequest.ApiRequest -> Bool
+returnsSingle apiRequest =
+  case ApiRequest.iTarget apiRequest of
+    ApiRequest.TargetProc proc _ ->
+      Types.procReturnsSingle proc
+    _ ->
+      False
+
+
+profileH :: ApiRequest.ApiRequest -> Maybe HTTP.Header
+profileH apiRequest =
+  contentProfileH <$> ApiRequest.iProfile apiRequest
+
+
+readSqlParts
+  :: Text
+  -> Text
+  -> Config.AppConfig
+  -> Types.DbStructure
+  -> ApiRequest.ApiRequest
+  -> [Types.ContentType]
+  -> Types.ContentType
+  -> Either
+       Wai.Response
+       (Hasql.Snippet, Hasql.Snippet, Maybe Types.FieldName, [Types.FieldName])
+readSqlParts schema name conf dbStructure apiRequest rawContentTypes contentType =
+  let
+    readReq =
+      DbRequestBuilder.readRequest
+        schema
+        name
+        (Config.configDbMaxRows conf)
+        (Types.dbRelations dbStructure)
+        apiRequest
+
+    returnings :: Types.ReadRequest -> Either Wai.Response [Types.FieldName]
+    returnings rr =
+      Right (DbRequestBuilder.returningCols rr [])
+  in
+  (,,,) <$>
+    (QueryBuilder.readRequestToQuery <$> readReq) <*>
+    (QueryBuilder.readRequestToCountQuery <$> readReq) <*>
+    (binaryField contentType rawContentTypes (returnsScalar apiRequest) =<< readReq) <*>
+    (returnings =<< readReq)
+
+
+mutateSqlParts
+  :: Text
+  -> Text
+  -> Config.AppConfig
+  -> Types.DbStructure
+  -> ApiRequest.ApiRequest
+  -> Either Wai.Response (Hasql.Snippet, Hasql.Snippet)
+mutateSqlParts schema name conf dbStructure apiRequest =
+  let
+    readReq =
+      DbRequestBuilder.readRequest
+        schema
+        name
+        (Config.configDbMaxRows conf)
+        (Types.dbRelations dbStructure)
+        apiRequest
+
+    mutReq =
+      DbRequestBuilder.mutateRequest
+        schema
+        name
+        apiRequest
+        (Types.tablePKCols dbStructure schema name)
+        =<< readReq
+  in
+  (,) <$>
+    (QueryBuilder.readRequestToQuery <$> readReq) <*>
+    (QueryBuilder.mutateRequestToQuery <$> mutReq)
+
 
 responseContentTypeOrError ::
   [Types.ContentType]
