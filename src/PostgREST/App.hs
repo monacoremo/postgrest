@@ -14,6 +14,7 @@ module PostgREST.App (postgrest) where
 import Data.IORef (IORef, readIORef)
 import Data.Time.Clock (UTCTime)
 
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Char8 as Char8ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Ranged.Ranges as Ranges
@@ -74,6 +75,7 @@ postgrest logLev refConf refDbStructure pool getTime connWorker =
           -- The postgrest function can respond successfully (with a stale schema
           -- cache) before the connWorker is done.
           when (Wai.responseStatus response == HTTP.status503) connWorker
+
           respond response
 
 
@@ -112,53 +114,58 @@ postgrestResponse time body dbStructure conf pool req =
         Left errJwt ->
           return . Error.errorResponseFor $ errJwt
         Right claims ->
-          let
-            authed =
-              Auth.containsRole claims
+          postgrestResponseWithClaims conf pool dbStructure apiRequest claims
 
-            shouldCommit =
-              Config.configDbTxAllowOverride conf
-              && ApiRequest.iPreferTransaction apiRequest == Just Types.Commit
 
-            shouldRollback =
-              Config.configDbTxAllowOverride conf
-              && ApiRequest.iPreferTransaction apiRequest == Just Types.Rollback
+postgrestResponseWithClaims
+  :: Config.AppConfig
+  -> Hasql.Pool
+  -> Types.DbStructure
+  -> ApiRequest.ApiRequest
+  -> HashMap.HashMap Text Aeson.Value
+  -> IO Wai.Response
+postgrestResponseWithClaims conf pool dbStructure apiRequest claims =
+  let
+    shouldCommit =
+      Config.configDbTxAllowOverride conf
+      && ApiRequest.iPreferTransaction apiRequest == Just Types.Commit
 
-            preferenceApplied
-              | shouldCommit =
-                  Types.addHeadersIfNotIncluded
-                    [(HTTP.hPreferenceApplied, Char8ByteString.pack (show Types.Commit))]
-              | shouldRollback =
-                  Types.addHeadersIfNotIncluded
-                    [(HTTP.hPreferenceApplied, Char8ByteString.pack (show Types.Rollback))]
-              | otherwise =
-                  identity
+    shouldRollback =
+      Config.configDbTxAllowOverride conf
+      && ApiRequest.iPreferTransaction apiRequest == Just Types.Rollback
 
-            handleReq =
-              do
-                when (shouldRollback || (Config.configDbTxRollbackAll conf && not shouldCommit))
-                  Hasql.condemn
+    preferenceApplied
+      | shouldCommit =
+          Types.addHeadersIfNotIncluded
+            [(HTTP.hPreferenceApplied, Char8ByteString.pack (show Types.Commit))]
+      | shouldRollback =
+          Types.addHeadersIfNotIncluded
+            [(HTTP.hPreferenceApplied, Char8ByteString.pack (show Types.Rollback))]
+      | otherwise =
+          identity
 
-                Wai.mapResponseHeaders preferenceApplied <$>
-                  Middleware.runPgLocals
-                    conf
-                    claims
-                    (app dbStructure conf)
-                    apiRequest
-          in
-          do
-            dbResp <-
-              Hasql.use pool $
-                Hasql.transaction
-                  Hasql.ReadCommitted
-                  (txMode apiRequest)
-                  handleReq
+    handleReq =
+      do
+        when (shouldRollback || (Config.configDbTxRollbackAll conf && not shouldCommit))
+          Hasql.condemn
 
-            return $
-              either
-                (Error.errorResponseFor . Error.PgError authed)
-                identity
-                dbResp
+        Wai.mapResponseHeaders preferenceApplied <$>
+          Middleware.runPgLocals
+            conf
+            claims
+            (app dbStructure conf)
+            apiRequest
+  in
+  do
+    dbResp <-
+      Hasql.use pool $
+        Hasql.transaction Hasql.ReadCommitted (txMode apiRequest) handleReq
+
+    return $
+      either
+        (Error.errorResponseFor . Error.PgError (Auth.containsRole claims))
+        identity
+        dbResp
 
 
 txMode :: ApiRequest.ApiRequest -> Hasql.Mode
@@ -994,8 +1001,8 @@ defaultContentTypes =
 
 
 {-
-  | If raw(binary) output is requested, check that ContentType is one of the admitted rawContentTypes and that
-  | `?select=...` contains only one field other than `*`
+  | If raw(binary) output is requested, check that ContentType is one of the admitted
+  | rawContentTypes and that`?select=...` contains only one field other than `*`
 -}
 binaryField ::
   Types.ContentType
