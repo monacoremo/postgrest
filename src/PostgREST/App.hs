@@ -532,28 +532,7 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                 return $ Wai.responseLBS status headers rBody
 
     (ApiRequest.ActionInfo, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tTable)) ->
-      let
-        mTable =
-          find
-            (\t -> Types.tableName t == tTable && Types.tableSchema t == tSchema)
-            (Types.dbTables dbStructure)
-      in
-      case mTable of
-        Nothing ->
-          return notFound
-        Just table ->
-          let
-            allowH =
-              ( HTTP.hAllow
-              , if Types.tableInsertable table then
-                  "GET,POST,PATCH,DELETE"
-                else
-                  "GET"
-              )
-            allOrigins =
-              ("Access-Control-Allow-Origin", "*") :: HTTP.Header
-          in
-          return $ Wai.responseLBS HTTP.status200 [allOrigins, allowH] mempty
+      return $ infoResponse dbStructure tSchema tTable
 
     (ApiRequest.ActionInvoke invMethod, ApiRequest.TargetProc proc _) ->
       invokeResponse conf dbStructure invMethod rawContentTypes contentType apiRequest proc
@@ -562,6 +541,33 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
       openApiResponse conf dbStructure apiRequest headersOnly tSchema
 
     _ -> return notFound
+
+
+infoResponse :: Types.DbStructure -> Text -> Text -> Wai.Response
+infoResponse dbStructure tSchema tTable =
+  let
+    mTable =
+      find
+        (\t -> Types.tableName t == tTable && Types.tableSchema t == tSchema)
+        (Types.dbTables dbStructure)
+  in
+  case mTable of
+    Nothing ->
+      notFound
+
+    Just table ->
+      let
+        allowH =
+          ( HTTP.hAllow
+          , if Types.tableInsertable table then
+              "GET,POST,PATCH,DELETE"
+            else
+              "GET"
+          )
+        allOrigins =
+          ("Access-Control-Allow-Origin", "*") :: HTTP.Header
+      in
+      Wai.responseLBS HTTP.status200 [allOrigins, allowH] mempty
 
 
 invokeResponse
