@@ -555,8 +555,35 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
           in
           return $ Wai.responseLBS HTTP.status200 [allOrigins, allowH] mempty
 
-    (ApiRequest.ActionInvoke invMethod, ApiRequest.TargetProc proc@Types.ProcDescription{Types.pdSchema, Types.pdName} _) ->
-      let tName = fromMaybe pdName $ Types.procTableName proc in
+    (ApiRequest.ActionInvoke invMethod, ApiRequest.TargetProc proc _) ->
+      invokeResponse conf dbStructure invMethod rawContentTypes contentType apiRequest proc
+
+    (ApiRequest.ActionInspect headersOnly, ApiRequest.TargetDefaultSpec tSchema) ->
+      openApiResponse conf dbStructure apiRequest headersOnly tSchema
+
+    _ -> return notFound
+
+
+invokeResponse
+  :: Config.AppConfig
+  -> Types.DbStructure
+  -> ApiRequest.InvokeMethod
+  -> [Types.ContentType]
+  -> Types.ContentType
+  -> ApiRequest.ApiRequest
+  -> Types.ProcDescription
+  -> Hasql.Transaction Wai.Response
+invokeResponse conf dbStructure invMethod rawContentTypes contentType apiRequest proc =
+      let
+        pdName =
+          Types.pdName proc
+
+        pdSchema =
+          Types.pdSchema proc
+
+        tName =
+          fromMaybe pdName $ Types.procTableName proc
+      in
       case readSqlParts pdSchema tName conf dbStructure apiRequest rawContentTypes contentType of
         Left errorResponse -> return errorResponse
         Right (q, cq, bField, returning) -> do
@@ -622,13 +649,6 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                   return . Error.errorResponseFor . Error.singularityError $ queryTotal
                 else
                   return $ Wai.responseLBS status headers rBody
-
-    (ApiRequest.ActionInspect headersOnly, ApiRequest.TargetDefaultSpec tSchema) ->
-      openApiResponse conf dbStructure apiRequest headersOnly tSchema
-
-    _ -> return notFound
-
-
 openApiResponse
   :: Config.AppConfig
   -> Types.DbStructure
