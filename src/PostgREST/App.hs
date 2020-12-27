@@ -623,58 +623,70 @@ appWithContentType dbStructure conf apiRequest rawContentTypes contentType =
                 else
                   return $ Wai.responseLBS status headers rBody
 
-    (ApiRequest.ActionInspect headersOnly, ApiRequest.TargetDefaultSpec tSchema) -> do
-      let
-        host =
-          Config.configServerHost conf
-
-        port =
-          toInteger $ Config.configServerPort conf
-
-        proxy =
-          OpenAPI.pickProxy $ toS <$> Config.configOpenApiServerProxyUri conf
-
-        uri Nothing =
-          ("http", host, port, "/")
-        uri (Just Types.Proxy { Types.proxyScheme = s, Types.proxyHost = h, Types.proxyPort = p, Types.proxyPath = b }) =
-          (s, h, p, b)
-
-        uri' = uri proxy
-
-        toTableInfo :: [Types.Table] -> [(Types.Table, [Types.Column], [Text])]
-        toTableInfo =
-          map
-            (\t ->
-              let
-                (s, tn) = (Types.tableSchema t, Types.tableName t)
-              in
-                ( t
-                , Types.tableCols dbStructure s tn
-                , Types.tablePKCols dbStructure s tn
-                )
-            )
-
-        encodeApi ti sd procs =
-          OpenAPI.encodeOpenAPI
-            (concat $ HashMap.elems procs)
-            (toTableInfo ti)
-            uri'
-            sd
-            (Types.dbPrimaryKeys dbStructure)
-
-      body <-
-        encodeApi <$>
-          Hasql.statement tSchema DbStructure.accessibleTables <*>
-          Hasql.statement tSchema DbStructure.schemaDescription <*>
-          Hasql.statement tSchema DbStructure.accessibleProcs
-
-      return $
-        Wai.responseLBS
-          HTTP.status200
-          (catMaybes [Just $ Types.toHeader Types.CTOpenAPI, profileH apiRequest])
-          (if headersOnly then mempty else toS body)
+    (ApiRequest.ActionInspect headersOnly, ApiRequest.TargetDefaultSpec tSchema) ->
+      openApiResponse conf dbStructure apiRequest headersOnly tSchema
 
     _ -> return notFound
+
+
+openApiResponse
+  :: Config.AppConfig
+  -> Types.DbStructure
+  -> ApiRequest.ApiRequest
+  -> Bool
+  -> Types.Schema
+  -> Hasql.Transaction Wai.Response
+openApiResponse conf dbStructure apiRequest headersOnly tSchema =
+  let
+    host =
+      Config.configServerHost conf
+
+    port =
+      toInteger $ Config.configServerPort conf
+
+    proxy =
+      OpenAPI.pickProxy $ toS <$> Config.configOpenApiServerProxyUri conf
+
+    uri Nothing =
+      ("http", host, port, "/")
+    uri (Just Types.Proxy { Types.proxyScheme = s, Types.proxyHost = h, Types.proxyPort = p, Types.proxyPath = b }) =
+      (s, h, p, b)
+
+    uri' = uri proxy
+
+    toTableInfo :: [Types.Table] -> [(Types.Table, [Types.Column], [Text])]
+    toTableInfo =
+      map
+        (\t ->
+          let
+            (s, tn) = (Types.tableSchema t, Types.tableName t)
+          in
+            ( t
+            , Types.tableCols dbStructure s tn
+            , Types.tablePKCols dbStructure s tn
+            )
+        )
+
+    encodeApi ti sd procs =
+      OpenAPI.encodeOpenAPI
+        (concat $ HashMap.elems procs)
+        (toTableInfo ti)
+        uri'
+        sd
+        (Types.dbPrimaryKeys dbStructure)
+  in
+  do
+    body <-
+      encodeApi <$>
+        Hasql.statement tSchema DbStructure.accessibleTables <*>
+        Hasql.statement tSchema DbStructure.schemaDescription <*>
+        Hasql.statement tSchema DbStructure.accessibleProcs
+
+    return $
+      Wai.responseLBS
+        HTTP.status200
+        (catMaybes [Just $ Types.toHeader Types.CTOpenAPI, profileH apiRequest])
+        (if headersOnly then mempty else toS body)
 
 
 notFound :: Wai.Response
