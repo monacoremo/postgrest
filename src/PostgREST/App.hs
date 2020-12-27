@@ -10,7 +10,6 @@ Some of its functionality includes:
 - Content Negotiation
 -}
 {-# LANGUAGE FlexibleContexts    #-}
-{-# LANGUAGE MultiWayIf          #-}
 {-# LANGUAGE NamedFieldPuns      #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
@@ -256,7 +255,7 @@ handleRead
 handleRead conf dbStructure apiRequest headersOnly rawContentTypes contentType identifier =
   case readSqlParts conf dbStructure apiRequest rawContentTypes contentType identifier of
     Left errorResponse -> return errorResponse
-    Right (q, cq, bField, _) -> do
+    Right (q, cq, bField, _) ->
       let
         cQuery =
           if estimatedCount apiRequest then
@@ -276,62 +275,77 @@ handleRead conf dbStructure apiRequest headersOnly rawContentTypes contentType i
             bField
             (Types.pgVersion dbStructure)
             (Config.configDbPreparedStatements conf)
+      in
+      do
+        (tableTotal, queryTotal, _ , body, gucHeaders, gucStatus) <-
+          Hasql.statement mempty stm
+        let
+          gucs =
+            (,) <$> gucHeaders <*> gucStatus
 
-        explStm =
-          Statements.createExplainStatement cq (Config.configDbPreparedStatements conf)
+        case gucs of
+          Left err ->
+            return $ Error.errorResponseFor err
+          Right (ghdrs, gstatus) -> do
+            total <- readTotal conf tableTotal apiRequest cq
+            let
+              (rangeStatus, contentRange) =
+                RangeQuery.rangeStatusHeader (topLevelRange apiRequest) queryTotal total
 
-      row <- Hasql.statement mempty stm
-      let
-        (tableTotal, queryTotal, _ , body, gucHeaders, gucStatus) =
-          row
+              status =
+                fromMaybe rangeStatus gstatus
 
-        gucs =
-          (,) <$> gucHeaders <*> gucStatus
-      case gucs of
-        Left err ->
-          return $ Error.errorResponseFor err
-        Right (ghdrs, gstatus) -> do
-          total <-
-            if | plannedCount apiRequest  -> Hasql.statement () explStm
-               | estimatedCount apiRequest ->
-                   if tableTotal > (fromIntegral <$> Config.configDbMaxRows conf) then
-                     do
-                       estTotal <- Hasql.statement () explStm
-                       pure $
-                         if estTotal > tableTotal then
-                           estTotal
-                         else
-                           tableTotal
-                   else
-                     pure tableTotal
-               | otherwise      -> pure tableTotal
-          let
-            (rangeStatus, contentRange) =
-              RangeQuery.rangeStatusHeader (topLevelRange apiRequest) queryTotal total
+              headers =
+                Types.addHeadersIfNotIncluded
+                  (catMaybes
+                    [ Just $ Types.toHeader contentType, Just contentRange
+                    , Just $
+                        contentLocationH
+                          (Types.qiName identifier)
+                          (ApiRequest.iCanonicalQS apiRequest)
+                    , profileH apiRequest
+                    ]
+                  )
+                  (Types.unwrapGucHeader <$> ghdrs)
 
-            status =
-              fromMaybe rangeStatus gstatus
+              rBody =
+                if headersOnly then mempty else toS body
+            return $
+              if contentType == Types.CTSingularJSON && queryTotal /= 1 then
+                Error.errorResponseFor . Error.singularityError $ queryTotal
+              else
+                Wai.responseLBS status headers rBody
 
-            headers =
-              Types.addHeadersIfNotIncluded
-                (catMaybes
-                  [ Just $ Types.toHeader contentType, Just contentRange
-                  , Just $
-                      contentLocationH
-                        (Types.qiName identifier)
-                        (ApiRequest.iCanonicalQS apiRequest)
-                  , profileH apiRequest
-                  ]
-                )
-                (Types.unwrapGucHeader <$> ghdrs)
 
-            rBody =
-              if headersOnly then mempty else toS body
+readTotal
+  :: Config.AppConfig
+  -> Maybe Int64
+  -> ApiRequest.ApiRequest
+  -> Hasql.Snippet
+  -> Hasql.Transaction (Maybe Int64)
+readTotal conf tableTotal apiRequest cq =
+  let
+    explStm =
+      Statements.createExplainStatement cq (Config.configDbPreparedStatements conf)
+  in
+  case ApiRequest.iPreferCount apiRequest of
+    Just Types.PlannedCount ->
+      Hasql.statement () explStm
+
+    Just Types.EstimatedCount ->
+      if tableTotal > (fromIntegral <$> Config.configDbMaxRows conf) then
+        do
+          estTotal <- Hasql.statement () explStm
           return $
-            if contentType == Types.CTSingularJSON && queryTotal /= 1 then
-              Error.errorResponseFor . Error.singularityError $ queryTotal
+            if estTotal > tableTotal then
+              estTotal
             else
-              Wai.responseLBS status headers rBody
+              tableTotal
+      else
+        return tableTotal
+
+    _ ->
+      return tableTotal
 
 
 handleCreate
@@ -344,7 +358,7 @@ handleCreate
 handleCreate conf dbStructure apiRequest contentType identifier =
   case mutateSqlParts conf dbStructure apiRequest identifier of
     Left errorResponse -> return errorResponse
-    Right (sq, mq) -> do
+    Right (sq, mq) ->
       let
         pkCols =
           Types.tablePKCols
@@ -363,52 +377,54 @@ handleCreate conf dbStructure apiRequest contentType identifier =
             pkCols
             (Types.pgVersion dbStructure)
             (Config.configDbPreparedStatements conf)
-      row <- Hasql.statement mempty stm
-      let
-        (_, queryTotal, fields, body, gucHeaders, gucStatus) =
-          row
+      in
+      do
+        (_, queryTotal, fields, body, gucHeaders, gucStatus) <-
+          Hasql.statement mempty stm
 
-        gucs =
-          (,) <$> gucHeaders <*> gucStatus
-      case gucs of
-        Left err -> return $ Error.errorResponseFor err
-        Right (ghdrs, gstatus) -> do
-          let
-            (ctHeaders, rBody) =
-              if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
-                ([Just $ Types.toHeader contentType, profileH apiRequest], toS body)
-              else
-                ([], mempty)
+        let
+          gucs =
+            (,) <$> gucHeaders <*> gucStatus
 
-            status =
-              fromMaybe HTTP.status201 gstatus
+        case gucs of
+          Left err -> return $ Error.errorResponseFor err
+          Right (ghdrs, gstatus) -> do
+            let
+              (ctHeaders, rBody) =
+                if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
+                  ([Just $ Types.toHeader contentType, profileH apiRequest], toS body)
+                else
+                  ([], mempty)
 
-            headers =
-              Types.addHeadersIfNotIncluded
-                (catMaybes (
-                  [ if null fields then
-                      Nothing
-                    else
-                      Just $ locationH (Types.qiName identifier) fields
-                  , Just $
-                      RangeQuery.contentRangeH
-                        1
-                        0
-                        (if shouldCount apiRequest then Just queryTotal else Nothing)
-                  , if null pkCols && isNothing (ApiRequest.iOnConflict apiRequest) then
-                      Nothing
-                    else
-                      (\x -> ("Preference-Applied", Char8ByteString.pack (show x))) <$>
-                        ApiRequest.iPreferResolution apiRequest
-                  ] ++ ctHeaders)
-                )
-                (Types.unwrapGucHeader <$> ghdrs)
-          if contentType == Types.CTSingularJSON && queryTotal /= 1 then
-            do
-              Hasql.condemn
-              return . Error.errorResponseFor . Error.singularityError $ queryTotal
-          else
-            return $ Wai.responseLBS status headers rBody
+              status =
+                fromMaybe HTTP.status201 gstatus
+
+              headers =
+                Types.addHeadersIfNotIncluded
+                  (catMaybes (
+                    [ if null fields then
+                        Nothing
+                      else
+                        Just $ locationH (Types.qiName identifier) fields
+                    , Just $
+                        RangeQuery.contentRangeH
+                          1
+                          0
+                          (if shouldCount apiRequest then Just queryTotal else Nothing)
+                    , if null pkCols && isNothing (ApiRequest.iOnConflict apiRequest) then
+                        Nothing
+                      else
+                        (\x -> ("Preference-Applied", Char8ByteString.pack (show x))) <$>
+                          ApiRequest.iPreferResolution apiRequest
+                    ] ++ ctHeaders)
+                  )
+                  (Types.unwrapGucHeader <$> ghdrs)
+            if contentType == Types.CTSingularJSON && queryTotal /= 1 then
+              do
+                Hasql.condemn
+                return . Error.errorResponseFor . Error.singularityError $ queryTotal
+            else
+              return $ Wai.responseLBS status headers rBody
 
 
 handleUpdate
@@ -423,9 +439,9 @@ handleUpdate conf dbStructure apiRequest contentType identifier =
     Left errorResponse ->
       return errorResponse
 
-    Right (sq, mq) -> do
-      row <-
-        Hasql.statement mempty $
+    Right (sq, mq) ->
+      let
+        statement =
           Statements.createWriteStatement
             sq
             mq
@@ -436,53 +452,56 @@ handleUpdate conf dbStructure apiRequest contentType identifier =
             []
             (Types.pgVersion dbStructure)
             (Config.configDbPreparedStatements conf)
+      in
+      do
+        (_, queryTotal, _, body, gucHeaders, gucStatus) <-
+          Hasql.statement mempty statement
 
-      let
-        (_, queryTotal, _, body, gucHeaders, gucStatus) = row
-        gucs =  (,) <$> gucHeaders <*> gucStatus
+        let
+          gucs =  (,) <$> gucHeaders <*> gucStatus
 
-      case gucs of
-        Left err ->
-          return $ Error.errorResponseFor err
-        Right (ghdrs, gstatus) -> do
-          let
-            updateIsNoOp =
-              Set.null (ApiRequest.iColumns apiRequest)
+        case gucs of
+          Left err ->
+            return $ Error.errorResponseFor err
+          Right (ghdrs, gstatus) -> do
+            let
+              updateIsNoOp =
+                Set.null (ApiRequest.iColumns apiRequest)
 
-            defStatus
-              | queryTotal == 0 && not updateIsNoOp =
-                  HTTP.status404
-              | ApiRequest.iPreferRepresentation apiRequest == Types.Full =
-                  HTTP.status200
-              | otherwise =
-                  HTTP.status204
+              defStatus
+                | queryTotal == 0 && not updateIsNoOp =
+                    HTTP.status404
+                | ApiRequest.iPreferRepresentation apiRequest == Types.Full =
+                    HTTP.status200
+                | otherwise =
+                    HTTP.status204
 
-            status =
-              fromMaybe defStatus gstatus
+              status =
+                fromMaybe defStatus gstatus
 
-            contentRangeHeader =
-              RangeQuery.contentRangeH
-                0
-                (queryTotal - 1)
-                (if shouldCount apiRequest then Just queryTotal else Nothing)
+              contentRangeHeader =
+                RangeQuery.contentRangeH
+                  0
+                  (queryTotal - 1)
+                  (if shouldCount apiRequest then Just queryTotal else Nothing)
 
-            (ctHeaders, rBody) =
-              if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
-                ([Just $ Types.toHeader contentType, profileH apiRequest], toS body)
-              else
-                ([], mempty)
+              (ctHeaders, rBody) =
+                if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
+                  ([Just $ Types.toHeader contentType, profileH apiRequest], toS body)
+                else
+                  ([], mempty)
 
-            headers =
-              Types.addHeadersIfNotIncluded
-                (catMaybes ctHeaders ++ [contentRangeHeader])
-                (Types.unwrapGucHeader <$> ghdrs)
+              headers =
+                Types.addHeadersIfNotIncluded
+                  (catMaybes ctHeaders ++ [contentRangeHeader])
+                  (Types.unwrapGucHeader <$> ghdrs)
 
-          if contentType == Types.CTSingularJSON && queryTotal /= 1 then
-            do
-              Hasql.condemn
-              return . Error.errorResponseFor . Error.singularityError $ queryTotal
-          else
-            return $ Wai.responseLBS status headers rBody
+            if contentType == Types.CTSingularJSON && queryTotal /= 1 then
+              do
+                Hasql.condemn
+                return . Error.errorResponseFor . Error.singularityError $ queryTotal
+            else
+              return $ Wai.responseLBS status headers rBody
 
 
 handleSingleUpsert
@@ -494,53 +513,61 @@ handleSingleUpsert
   -> Hasql.Transaction Wai.Response
 handleSingleUpsert conf dbStructure apiRequest contentType identifier =
   case mutateSqlParts conf dbStructure apiRequest identifier of
-    Left errorResponse -> return errorResponse
+    Left errorResponse ->
+      return errorResponse
+
     Right (sq, mq) ->
       if topLevelRange apiRequest /= RangeQuery.allRange then
         return . Error.errorResponseFor $ Error.PutRangeNotAllowedError
-      else do
-        row <-
-          Hasql.statement mempty $
-            Statements.createWriteStatement
-              sq
-              mq
-              (contentType == Types.CTSingularJSON)
-              False
-              (contentType == Types.CTTextCSV)
-              (ApiRequest.iPreferRepresentation apiRequest)
-              []
-              (Types.pgVersion dbStructure)
-              (Config.configDbPreparedStatements conf)
-        let (_, queryTotal, _, body, gucHeaders, gucStatus) = row
+      else
+        let
+          statement =
+              Statements.createWriteStatement
+                sq
+                mq
+                (contentType == Types.CTSingularJSON)
+                False
+                (contentType == Types.CTTextCSV)
+                (ApiRequest.iPreferRepresentation apiRequest)
+                []
+                (Types.pgVersion dbStructure)
+                (Config.configDbPreparedStatements conf)
+        in
+        do
+          (_, queryTotal, _, body, gucHeaders, gucStatus) <-
+            Hasql.statement mempty statement
+
+          let
             gucs =  (,) <$> gucHeaders <*> gucStatus
-        case gucs of
-          Left err -> return $ Error.errorResponseFor err
-          Right (ghdrs, gstatus) -> do
-            let
-              headers =
-                Types.addHeadersIfNotIncluded
-                  (catMaybes [Just $ Types.toHeader contentType, profileH apiRequest])
-                  (Types.unwrapGucHeader <$> ghdrs)
 
-              (defStatus, rBody) =
-                if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
-                  (HTTP.status200, toS body)
-                else
-                  (HTTP.status204, mempty)
+          case gucs of
+            Left err -> return $ Error.errorResponseFor err
+            Right (ghdrs, gstatus) -> do
+              let
+                headers =
+                  Types.addHeadersIfNotIncluded
+                    (catMaybes [Just $ Types.toHeader contentType, profileH apiRequest])
+                    (Types.unwrapGucHeader <$> ghdrs)
 
-              status = fromMaybe defStatus gstatus
+                (defStatus, rBody) =
+                  if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
+                    (HTTP.status200, toS body)
+                  else
+                    (HTTP.status204, mempty)
 
-            -- Makes sure the querystring pk matches the payload pk
-            -- e.g. PUT /items?id=eq.1 { "id" : 1, .. } is accepted,
-            -- PUT /items?id=eq.14 { "id" : 2, .. } is rejected
-            -- If this condition is not satisfied then nothing is inserted,
-            -- check the WHERE for INSERT in QueryBuilder.hs to see how it's done
-            if queryTotal /= 1 then
-              do
-                Hasql.condemn
-                return . Error.errorResponseFor $ Error.PutMatchingPkError
-            else
-              return $ Wai.responseLBS status headers rBody
+                status = fromMaybe defStatus gstatus
+
+              -- Makes sure the querystring pk matches the payload pk
+              -- e.g. PUT /items?id=eq.1 { "id" : 1, .. } is accepted,
+              -- PUT /items?id=eq.14 { "id" : 2, .. } is rejected
+              -- If this condition is not satisfied then nothing is inserted,
+              -- check the WHERE for INSERT in QueryBuilder.hs to see how it's done
+              if queryTotal /= 1 then
+                do
+                  Hasql.condemn
+                  return . Error.errorResponseFor $ Error.PutMatchingPkError
+              else
+                return $ Wai.responseLBS status headers rBody
 
 
 handleDelete
@@ -565,9 +592,13 @@ handleDelete conf dbStructure contentType apiRequest identifier =
             []
             (Types.pgVersion dbStructure)
             (Config.configDbPreparedStatements conf)
-      row <- Hasql.statement mempty stm
-      let (_, queryTotal, _, body, gucHeaders, gucStatus) = row
-          gucs =  (,) <$> gucHeaders <*> gucStatus
+
+      (_, queryTotal, _, body, gucHeaders, gucStatus) <-
+        Hasql.statement mempty stm
+
+      let
+        gucs =  (,) <$> gucHeaders <*> gucStatus
+
       case gucs of
         Left err ->
           return $ Error.errorResponseFor err
@@ -660,8 +691,10 @@ handleInvoke conf dbStructure invMethod rawContentTypes contentType apiRequest p
       Types.QualifiedIdentifier pdSchema tName
   in
   case readSqlParts conf dbStructure apiRequest rawContentTypes contentType identifier of
-    Left errorResponse -> return errorResponse
-    Right (q, cq, bField, returning) -> do
+    Left errorResponse ->
+      return errorResponse
+
+    Right (q, cq, bField, returning) ->
       let
         preferParams =
           ApiRequest.iPreferParameters apiRequest
@@ -689,49 +722,48 @@ handleInvoke conf dbStructure invMethod rawContentTypes contentType apiRequest p
             bField
             (Types.pgVersion dbStructure)
             (Config.configDbPreparedStatements conf)
+      in
+      do
+        (tableTotal, queryTotal, body, gucHeaders, gucStatus) <-
+          Hasql.statement mempty stm
 
-      row <- Hasql.statement mempty stm
+        let
+          gucs =
+            (,) <$> gucHeaders <*> gucStatus
 
-      let
-        (tableTotal, queryTotal, body, gucHeaders, gucStatus) =
-          row
+        case gucs of
+          Left err ->
+            return $ Error.errorResponseFor err
 
-        gucs =
-          (,) <$> gucHeaders <*> gucStatus
+          Right (ghdrs, gstatus) ->
+            let
+              (rangeStatus, contentRange) =
+                RangeQuery.rangeStatusHeader
+                  (topLevelRange apiRequest)
+                  queryTotal
+                  tableTotal
 
-      case gucs of
-        Left err ->
-          return $ Error.errorResponseFor err
+              status =
+                fromMaybe rangeStatus gstatus
 
-        Right (ghdrs, gstatus) ->
-          let
-            (rangeStatus, contentRange) =
-              RangeQuery.rangeStatusHeader
-                (topLevelRange apiRequest)
-                queryTotal
-                tableTotal
+              headers =
+                Types.addHeadersIfNotIncluded
+                  (catMaybes
+                    [ Just $ Types.toHeader contentType
+                    , Just contentRange, profileH apiRequest
+                    ]
+                  )
+                  (Types.unwrapGucHeader <$> ghdrs)
 
-            status =
-              fromMaybe rangeStatus gstatus
-
-            headers =
-              Types.addHeadersIfNotIncluded
-                (catMaybes
-                  [ Just $ Types.toHeader contentType
-                  , Just contentRange, profileH apiRequest
-                  ]
-                )
-                (Types.unwrapGucHeader <$> ghdrs)
-
-            rBody =
-              if invMethod == ApiRequest.InvHead then mempty else toS body
-          in
-          if contentType == Types.CTSingularJSON && queryTotal /= 1
-            then do
-              Hasql.condemn
-              return . Error.errorResponseFor . Error.singularityError $ queryTotal
-            else
-              return $ Wai.responseLBS status headers rBody
+              rBody =
+                if invMethod == ApiRequest.InvHead then mempty else toS body
+            in
+            if contentType == Types.CTSingularJSON && queryTotal /= 1
+              then do
+                Hasql.condemn
+                return . Error.errorResponseFor . Error.singularityError $ queryTotal
+              else
+                return $ Wai.responseLBS status headers rBody
 
 
 handleOpenApi
@@ -814,11 +846,6 @@ exactCount apiRequest =
 estimatedCount :: ApiRequest.ApiRequest -> Bool
 estimatedCount apiRequest =
   ApiRequest.iPreferCount apiRequest == Just Types.EstimatedCount
-
-
-plannedCount :: ApiRequest.ApiRequest -> Bool
-plannedCount apiRequest =
-  ApiRequest.iPreferCount apiRequest == Just Types.PlannedCount
 
 
 shouldCount :: ApiRequest.ApiRequest -> Bool
