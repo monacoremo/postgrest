@@ -18,7 +18,6 @@ module PostgREST.App (postgrest) where
 
 import Data.IORef (IORef, readIORef)
 import Data.Time.Clock (UTCTime)
-import Network.HTTP.Types.URI (renderSimpleQuery)
 
 import qualified Data.ByteString.Char8 as Char8ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
@@ -32,6 +31,7 @@ import qualified Hasql.Transaction.Sessions as Hasql
 import qualified Hasql.DynamicStatements.Snippet as Hasql
 import qualified Network.HTTP.Types.Header as HTTP
 import qualified Network.HTTP.Types.Status as HTTP
+import qualified Network.HTTP.Types.URI as HTTP
 import qualified Network.Wai as Wai
 
 import qualified PostgREST.ApiRequest as ApiRequest
@@ -207,6 +207,7 @@ app dbStructure conf apiRequest =
     Right contentType ->
       handleRequest dbStructure conf apiRequest rawContentTypes contentType
 
+
 handleRequest
   :: Types.DbStructure
   -> Config.AppConfig
@@ -319,7 +320,7 @@ handleRead conf dbStructure apiRequest headersOnly rawContentTypes contentType t
                       contentLocationH
                         tName
                         (ApiRequest.iCanonicalQS apiRequest)
-                  , (profileH apiRequest)
+                  , profileH apiRequest
                   ]
                 )
                 (Types.unwrapGucHeader <$> ghdrs)
@@ -723,41 +724,12 @@ handleOpenApi
   -> Hasql.Transaction Wai.Response
 handleOpenApi conf dbStructure apiRequest headersOnly tSchema =
   let
-    host =
-      Config.configServerHost conf
-
-    port =
-      toInteger $ Config.configServerPort conf
-
-    proxy =
-      OpenAPI.pickProxy $ toS <$> Config.configOpenApiServerProxyUri conf
-
-    uri Nothing =
-      ("http", host, port, "/")
-    uri (Just Types.Proxy { Types.proxyScheme = s, Types.proxyHost = h, Types.proxyPort = p, Types.proxyPath = b }) =
-      (s, h, p, b)
-
-    uri' = uri proxy
-
-    toTableInfo :: [Types.Table] -> [(Types.Table, [Types.Column], [Text])]
-    toTableInfo =
-      map
-        (\t ->
-          let
-            (s, tn) = (Types.tableSchema t, Types.tableName t)
-          in
-            ( t
-            , Types.tableCols dbStructure s tn
-            , Types.tablePKCols dbStructure s tn
-            )
-        )
-
-    encodeApi ti sd procs =
+    encodeApi tables schemaDescription procs =
       OpenAPI.encodeOpenAPI
         (concat $ HashMap.elems procs)
-        (toTableInfo ti)
-        uri'
-        sd
+        (fmap (openApiTableInfo dbStructure) tables)
+        (openApiUri conf)
+        schemaDescription
         (Types.dbPrimaryKeys dbStructure)
   in
   do
@@ -772,6 +744,42 @@ handleOpenApi conf dbStructure apiRequest headersOnly tSchema =
         HTTP.status200
         (catMaybes [Just $ Types.toHeader Types.CTOpenAPI, profileH apiRequest])
         (if headersOnly then mempty else toS body)
+
+
+openApiUri :: Config.AppConfig -> (Text, Text, Integer, Text)
+openApiUri conf =
+  let
+    maybeProxy =
+      OpenAPI.pickProxy $ toS <$> Config.configOpenApiServerProxyUri conf
+  in
+    case maybeProxy of
+      Just proxy ->
+        ( Types.proxyScheme proxy
+        , Types.proxyHost proxy
+        , Types.proxyPort proxy
+        , Types.proxyPath proxy
+        )
+      Nothing ->
+        ("http"
+        , Config.configServerHost conf
+        , toInteger $ Config.configServerPort conf
+        , "/"
+        )
+
+
+openApiTableInfo :: Types.DbStructure -> Types.Table -> (Types.Table, [Types.Column], [Text])
+openApiTableInfo dbStructure table =
+  let
+    schema =
+      Types.tableSchema table
+
+    name =
+      Types.tableName table
+  in
+    ( table
+    , Types.tableCols dbStructure schema name
+    , Types.tablePKCols dbStructure schema name
+    )
 
 
 notFound :: Wai.Response
@@ -896,38 +904,48 @@ responseContentTypeOrError ::
   -> ApiRequest.Target
   -> Either Wai.Response Types.ContentType
 responseContentTypeOrError accepts rawContentTypes action target =
-  serves contentTypesForRequest accepts
-  where
-    contentTypesForRequest =
-      case action of
-        ApiRequest.ActionRead _ ->
-          [ Types.CTApplicationJSON
-          , Types.CTSingularJSON
-          , Types.CTTextCSV
-          ] ++ rawContentTypes
-        ApiRequest.ActionCreate ->
-          [Types.CTApplicationJSON, Types.CTSingularJSON, Types.CTTextCSV]
-        ApiRequest.ActionUpdate ->
-          [Types.CTApplicationJSON, Types.CTSingularJSON, Types.CTTextCSV]
-        ApiRequest.ActionDelete ->
-          [Types.CTApplicationJSON, Types.CTSingularJSON, Types.CTTextCSV]
-        ApiRequest.ActionInvoke _ ->
-          [Types.CTApplicationJSON, Types.CTSingularJSON, Types.CTTextCSV]
-            ++ rawContentTypes
-            ++ [Types.CTOpenAPI | ApiRequest.tpIsRootSpec target]
-        ApiRequest.ActionInspect _ ->
-          [Types.CTOpenAPI, Types.CTApplicationJSON]
-        ApiRequest.ActionInfo ->
-          [Types.CTTextCSV]
-        ApiRequest.ActionSingleUpsert ->
-          [Types.CTApplicationJSON, Types.CTSingularJSON, Types.CTTextCSV]
+  let
+    produces =
+      requestContentTypes rawContentTypes action target
+  in
+  case ApiRequest.mutuallyAgreeable produces accepts of
+    Just ct ->
+      Right ct
 
-    serves sProduces cAccepts =
-      case ApiRequest.mutuallyAgreeable sProduces cAccepts of
-        Nothing ->
-          Left . Error.errorResponseFor . Error.ContentTypeError . map Types.toMime $ cAccepts
-        Just ct ->
-          Right ct
+    Nothing ->
+      Left . Error.errorResponseFor . Error.ContentTypeError . map Types.toMime $ accepts
+
+
+requestContentTypes
+  :: [Types.ContentType]
+  -> ApiRequest.Action
+  -> ApiRequest.Target
+  -> [Types.ContentType]
+requestContentTypes rawContentTypes action target =
+  case action of
+    ApiRequest.ActionRead _ ->
+      defaultContentTypes ++ rawContentTypes
+    ApiRequest.ActionCreate ->
+      defaultContentTypes
+    ApiRequest.ActionUpdate ->
+      defaultContentTypes
+    ApiRequest.ActionDelete ->
+      defaultContentTypes
+    ApiRequest.ActionInvoke _ ->
+      defaultContentTypes
+        ++ rawContentTypes
+        ++ [Types.CTOpenAPI | ApiRequest.tpIsRootSpec target]
+    ApiRequest.ActionInspect _ ->
+      [Types.CTOpenAPI, Types.CTApplicationJSON]
+    ApiRequest.ActionInfo ->
+      [Types.CTTextCSV]
+    ApiRequest.ActionSingleUpsert ->
+      defaultContentTypes
+
+
+defaultContentTypes :: [Types.ContentType]
+defaultContentTypes =
+  [Types.CTApplicationJSON, Types.CTSingularJSON, Types.CTTextCSV]
 
 
 {-
@@ -941,33 +959,40 @@ binaryField ::
   -> Types.ReadRequest
   -> Either Wai.Response (Maybe Types.FieldName)
 binaryField ct rawContentTypes isScalarProc readReq
-  | isScalarProc =
-      if ct `elem` rawContentTypes then
-        Right $ Just "pgrst_scalar"
-      else
-        Right Nothing
+  | isScalarProc && ct `elem` rawContentTypes =
+      Right $ Just "pgrst_scalar"
   | ct `elem` rawContentTypes =
-      let fieldName = headMay fldNames in
+      let
+        fldNames =
+          Types.fstFieldNames readReq
+
+        fieldName =
+          headMay fldNames
+      in
       if length fldNames == 1 && fieldName /= Just "*" then
         Right fieldName
       else
         Left . Error.errorResponseFor $ Error.BinaryFieldError ct
   | otherwise = Right Nothing
-  where
-    fldNames = Types.fstFieldNames readReq
 
 
 locationH :: Types.TableName -> [Char8ByteString.ByteString] -> HTTP.Header
 locationH tName fields =
   let
-    locationFields = renderSimpleQuery True $ splitKeyValue <$> fields
+    locationFields = HTTP.renderSimpleQuery True $ splitKeyValue <$> fields
   in
     (HTTP.hLocation, "/" <> toS tName <> locationFields)
-  where
-    splitKeyValue :: Char8ByteString.ByteString -> (Char8ByteString.ByteString, Char8ByteString.ByteString)
-    splitKeyValue kv =
-      let (k, v) = Char8ByteString.break (== '=') kv
-      in (k, Char8ByteString.tail v)
+
+
+splitKeyValue
+  :: Char8ByteString.ByteString
+  -> (Char8ByteString.ByteString, Char8ByteString.ByteString)
+splitKeyValue kv =
+  let
+    (k, v) =
+      Char8ByteString.break (== '=') kv
+  in
+    (k, Char8ByteString.tail v)
 
 
 contentLocationH :: Types.TableName -> ByteString -> HTTP.Header
