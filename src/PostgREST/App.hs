@@ -226,14 +226,14 @@ handleRequest dbStructure conf apiRequest rawContentTypes contentType =
     (ApiRequest.ActionUpdate, ApiRequest.TargetIdent identifier) ->
       handleUpdate conf dbStructure apiRequest contentType identifier
 
-    (ApiRequest.ActionSingleUpsert, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tName)) ->
-      handleSingleUpsert conf dbStructure apiRequest contentType tSchema tName
+    (ApiRequest.ActionSingleUpsert, ApiRequest.TargetIdent identifier) ->
+      handleSingleUpsert conf dbStructure apiRequest contentType identifier
 
-    (ApiRequest.ActionDelete, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tName)) ->
-      handleDelete conf dbStructure contentType apiRequest tSchema tName
+    (ApiRequest.ActionDelete, ApiRequest.TargetIdent identifier) ->
+      handleDelete conf dbStructure contentType apiRequest identifier
 
-    (ApiRequest.ActionInfo, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tTable)) ->
-      return $ handleInfo dbStructure tSchema tTable
+    (ApiRequest.ActionInfo, ApiRequest.TargetIdent identifier) ->
+      return $ handleInfo dbStructure identifier
 
     (ApiRequest.ActionInvoke invMethod, ApiRequest.TargetProc proc _) ->
       handleInvoke conf dbStructure invMethod rawContentTypes contentType apiRequest proc
@@ -343,7 +343,7 @@ handleCreate
   -> Types.QualifiedIdentifier
   -> Hasql.Transaction Wai.Response
 handleCreate conf dbStructure apiRequest contentType identifier =
-  case mutateSqlParts (Types.qiSchema identifier) (Types.qiName identifier) conf dbStructure apiRequest of
+  case mutateSqlParts conf dbStructure apiRequest identifier of
     Left errorResponse -> return errorResponse
     Right (sq, mq) -> do
       let
@@ -420,7 +420,7 @@ handleUpdate
   -> Types.QualifiedIdentifier
   -> Hasql.Transaction Wai.Response
 handleUpdate conf dbStructure apiRequest contentType identifier =
-  case mutateSqlParts (Types.qiSchema identifier) (Types.qiName identifier) conf dbStructure apiRequest of
+  case mutateSqlParts conf dbStructure apiRequest identifier of
     Left errorResponse ->
       return errorResponse
 
@@ -491,11 +491,10 @@ handleSingleUpsert
   -> Types.DbStructure
   -> ApiRequest.ApiRequest
   -> Types.ContentType
-  -> Text
-  -> Text
+  -> Types.QualifiedIdentifier
   -> Hasql.Transaction Wai.Response
-handleSingleUpsert conf dbStructure apiRequest contentType tSchema tName =
-  case mutateSqlParts tSchema tName conf dbStructure apiRequest of
+handleSingleUpsert conf dbStructure apiRequest contentType identifier =
+  case mutateSqlParts conf dbStructure apiRequest identifier of
     Left errorResponse -> return errorResponse
     Right (sq, mq) ->
       if topLevelRange apiRequest /= RangeQuery.allRange then
@@ -550,11 +549,10 @@ handleDelete
   -> Types.DbStructure
   -> Types.ContentType
   -> ApiRequest.ApiRequest
-  -> Text
-  -> Text
+  -> Types.QualifiedIdentifier
   -> Hasql.Transaction Wai.Response
-handleDelete conf dbStructure contentType apiRequest tSchema tName =
-  case mutateSqlParts tSchema tName conf dbStructure apiRequest of
+handleDelete conf dbStructure contentType apiRequest identifier =
+  case mutateSqlParts conf dbStructure apiRequest identifier of
     Left errorResponse -> return errorResponse
     Right (sq, mq) -> do
       let
@@ -609,12 +607,15 @@ handleDelete conf dbStructure contentType apiRequest tSchema tName =
             return $ Wai.responseLBS status headers rBody
 
 
-handleInfo :: Types.DbStructure -> Text -> Text -> Wai.Response
-handleInfo dbStructure tSchema tTable =
+handleInfo :: Types.DbStructure -> Types.QualifiedIdentifier -> Wai.Response
+handleInfo dbStructure identifier =
   let
     mTable =
       find
-        (\t -> Types.tableName t == tTable && Types.tableSchema t == tSchema)
+        (\t ->
+          Types.tableName t == Types.qiName identifier
+          && Types.tableSchema t == Types.qiSchema identifier
+        )
         (Types.dbTables dbStructure)
   in
   case mTable of
@@ -884,28 +885,27 @@ readSqlParts schema name conf dbStructure apiRequest rawContentTypes contentType
 
 
 mutateSqlParts
-  :: Text
-  -> Text
-  -> Config.AppConfig
+  :: Config.AppConfig
   -> Types.DbStructure
   -> ApiRequest.ApiRequest
+  -> Types.QualifiedIdentifier
   -> Either Wai.Response (Hasql.Snippet, Hasql.Snippet)
-mutateSqlParts schema name conf dbStructure apiRequest =
+mutateSqlParts conf dbStructure apiRequest identifier =
   let
     readReq =
       DbRequestBuilder.readRequest
-        schema
-        name
+        (Types.qiSchema identifier)
+        (Types.qiName identifier)
         (Config.configDbMaxRows conf)
         (Types.dbRelations dbStructure)
         apiRequest
 
     mutReq =
       DbRequestBuilder.mutateRequest
-        schema
-        name
+        (Types.qiSchema identifier)
+        (Types.qiName identifier)
         apiRequest
-        (Types.tablePKCols dbStructure schema name)
+        (Types.tablePKCols dbStructure (Types.qiSchema identifier) (Types.qiName identifier))
         =<< readReq
   in
   (,) <$>
