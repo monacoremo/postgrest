@@ -20,7 +20,8 @@ import Data.IORef (IORef, readIORef)
 import Data.Time.Clock (UTCTime)
 import Network.HTTP.Types.URI (renderSimpleQuery)
 
-import qualified Data.ByteString.Char8 as BS
+import qualified Data.ByteString.Char8 as Char8ByteString
+import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.List as List (union)
 import qualified Data.Set as Set
@@ -66,82 +67,95 @@ postgrest logLev refConf refDbStructure pool getTime connWorker =
       Nothing ->
         respond . Error.errorResponseFor $ Error.ConnectionLostError
       Just dbStructure -> do
-        response <- do
-          let
-            apiReq =
-              ApiRequest.userApiRequest
-                (Config.configDbSchemas conf)
-                (Config.configDbRootSpec conf)
-                dbStructure
-                req
-                body
-          case apiReq of
-            Left err -> return . Error.errorResponseFor $ err
-            Right apiRequest -> do
-              -- The jwt must be checked before touching the db.
-              attempt <-
-                Auth.attemptJwtClaims
-                  (Config.configJWKS conf)
-                  (Config.configJwtAudience conf)
-                  (toS $ ApiRequest.iJWT apiRequest)
-                  time
-                  (rightToMaybe $ Config.configJwtRoleClaimKey conf)
-              case Auth.jwtClaims attempt of
-                Left errJwt ->
-                  return . Error.errorResponseFor $ errJwt
-                Right claims ->
-                  do
-                    let
-                      authed =
-                        Auth.containsRole claims
-                      shouldCommit =
-                        Config.configDbTxAllowOverride conf
-                        && ApiRequest.iPreferTransaction apiRequest == Just Types.Commit
-
-                      shouldRollback =
-                        Config.configDbTxAllowOverride conf
-                        && ApiRequest.iPreferTransaction apiRequest == Just Types.Rollback
-
-                      preferenceApplied
-                        | shouldCommit =
-                            Types.addHeadersIfNotIncluded
-                              [(HTTP.hPreferenceApplied, BS.pack (show Types.Commit))]
-                        | shouldRollback =
-                            Types.addHeadersIfNotIncluded
-                              [(HTTP.hPreferenceApplied, BS.pack (show Types.Rollback))]
-                        | otherwise =
-                            identity
-
-                      handleReq =
-                        do
-                          when (shouldRollback || (Config.configDbTxRollbackAll conf && not shouldCommit))
-                            Hasql.condemn
-
-                          Wai.mapResponseHeaders preferenceApplied <$>
-                            Middleware.runPgLocals
-                              conf
-                              claims
-                              (app dbStructure conf)
-                              apiRequest
-
-                    dbResp <-
-                      Hasql.use pool $
-                        Hasql.transaction
-                          Hasql.ReadCommitted
-                          (txMode apiRequest)
-                          handleReq
-
-                    return $
-                      either
-                        (Error.errorResponseFor . Error.PgError authed)
-                        identity
-                        dbResp
+        response <-
+          postgrestResponse time body dbStructure conf pool req
 
         -- Launch the connWorker when the connection is down.
         -- The postgrest function can respond successfully (with a stale schema
         -- cache) before the connWorker is done.
         when (Wai.responseStatus response == HTTP.status503) connWorker
         respond response
+
+postgrestResponse
+  :: UTCTime
+  -> LazyByteString.ByteString
+  -> Types.DbStructure
+  -> Config.AppConfig
+  -> Hasql.Pool
+  -> Wai.Request
+  -> IO Wai.Response
+postgrestResponse time body dbStructure conf pool req =
+  let
+    apiReq =
+      ApiRequest.userApiRequest
+        (Config.configDbSchemas conf)
+        (Config.configDbRootSpec conf)
+        dbStructure
+        req
+        body
+  in
+  case apiReq of
+    Left err -> return . Error.errorResponseFor $ err
+    Right apiRequest -> do
+      -- The jwt must be checked before touching the db.
+      attempt <-
+        Auth.attemptJwtClaims
+          (Config.configJWKS conf)
+          (Config.configJwtAudience conf)
+          (toS $ ApiRequest.iJWT apiRequest)
+          time
+          (rightToMaybe $ Config.configJwtRoleClaimKey conf)
+      case Auth.jwtClaims attempt of
+        Left errJwt ->
+          return . Error.errorResponseFor $ errJwt
+        Right claims ->
+          do
+            let
+              authed =
+                Auth.containsRole claims
+              shouldCommit =
+                Config.configDbTxAllowOverride conf
+                && ApiRequest.iPreferTransaction apiRequest == Just Types.Commit
+
+              shouldRollback =
+                Config.configDbTxAllowOverride conf
+                && ApiRequest.iPreferTransaction apiRequest == Just Types.Rollback
+
+              preferenceApplied
+                | shouldCommit =
+                    Types.addHeadersIfNotIncluded
+                      [(HTTP.hPreferenceApplied, Char8ByteString.pack (show Types.Commit))]
+                | shouldRollback =
+                    Types.addHeadersIfNotIncluded
+                      [(HTTP.hPreferenceApplied, Char8ByteString.pack (show Types.Rollback))]
+                | otherwise =
+                    identity
+
+              handleReq =
+                do
+                  when (shouldRollback || (Config.configDbTxRollbackAll conf && not shouldCommit))
+                    Hasql.condemn
+
+                  Wai.mapResponseHeaders preferenceApplied <$>
+                    Middleware.runPgLocals
+                      conf
+                      claims
+                      (app dbStructure conf)
+                      apiRequest
+
+            dbResp <-
+              Hasql.use pool $
+                Hasql.transaction
+                  Hasql.ReadCommitted
+                  (txMode apiRequest)
+                  handleReq
+
+            return $
+              either
+                (Error.errorResponseFor . Error.PgError authed)
+                identity
+                dbResp
+
 
 txMode :: ApiRequest.ApiRequest -> Hasql.Mode
 txMode apiRequest =
@@ -308,7 +322,7 @@ app dbStructure conf apiRequest =
                           , if null pkCols && isNothing (ApiRequest.iOnConflict apiRequest) then
                               Nothing
                             else
-                              (\x -> ("Preference-Applied", BS.pack (show x))) <$>
+                              (\x -> ("Preference-Applied", Char8ByteString.pack (show x))) <$>
                                 ApiRequest.iPreferResolution apiRequest
                           ] ++ ctHeaders)
                         )
@@ -423,6 +437,7 @@ app dbStructure conf apiRequest =
                           (HTTP.status204, mempty)
 
                       status = fromMaybe defStatus gstatus
+
                     -- Makes sure the querystring pk matches the payload pk
                     -- e.g. PUT /items?id=eq.1 { "id" : 1, .. } is accepted,
                     -- PUT /items?id=eq.14 { "id" : 2, .. } is rejected
@@ -788,23 +803,23 @@ binaryField ct rawContentTypes isScalarProc readReq
     fldNames = Types.fstFieldNames readReq
 
 
-locationH :: Types.TableName -> [BS.ByteString] -> HTTP.Header
+locationH :: Types.TableName -> [Char8ByteString.ByteString] -> HTTP.Header
 locationH tName fields =
   let
     locationFields = renderSimpleQuery True $ splitKeyValue <$> fields
   in
     (HTTP.hLocation, "/" <> toS tName <> locationFields)
   where
-    splitKeyValue :: BS.ByteString -> (BS.ByteString, BS.ByteString)
+    splitKeyValue :: Char8ByteString.ByteString -> (Char8ByteString.ByteString, Char8ByteString.ByteString)
     splitKeyValue kv =
-      let (k, v) = BS.break (== '=') kv
-      in (k, BS.tail v)
+      let (k, v) = Char8ByteString.break (== '=') kv
+      in (k, Char8ByteString.tail v)
 
 
 contentLocationH :: Types.TableName -> ByteString -> HTTP.Header
 contentLocationH tName qString =
   ( "Content-Location"
-  , "/" <> toS tName <> if BS.null qString then mempty else "?" <> toS qString
+  , "/" <> toS tName <> if Char8ByteString.null qString then mempty else "?" <> toS qString
   )
 
 
