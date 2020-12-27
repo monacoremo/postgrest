@@ -217,8 +217,8 @@ handleRequest
   -> Hasql.Transaction Wai.Response
 handleRequest dbStructure conf apiRequest rawContentTypes contentType =
   case (ApiRequest.iAction apiRequest, ApiRequest.iTarget apiRequest) of
-    (ApiRequest.ActionRead headersOnly, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tName)) ->
-      handleRead conf dbStructure apiRequest headersOnly rawContentTypes contentType tSchema tName
+    (ApiRequest.ActionRead headersOnly, ApiRequest.TargetIdent identifier) ->
+      handleRead conf dbStructure apiRequest headersOnly rawContentTypes contentType identifier
 
     (ApiRequest.ActionCreate, ApiRequest.TargetIdent identifier) ->
       handleCreate conf dbStructure apiRequest contentType identifier
@@ -251,11 +251,10 @@ handleRead
   -> Bool
   -> [Types.ContentType]
   -> Types.ContentType
-  -> Text
-  -> Text
+  -> Types.QualifiedIdentifier
   -> Hasql.Transaction Wai.Response
-handleRead conf dbStructure apiRequest headersOnly rawContentTypes contentType tSchema tName =
-  case readSqlParts tSchema tName conf dbStructure apiRequest rawContentTypes contentType of
+handleRead conf dbStructure apiRequest headersOnly rawContentTypes contentType identifier =
+  case readSqlParts conf dbStructure apiRequest rawContentTypes contentType identifier of
     Left errorResponse -> return errorResponse
     Right (q, cq, bField, _) -> do
       let
@@ -319,7 +318,7 @@ handleRead conf dbStructure apiRequest headersOnly rawContentTypes contentType t
                   [ Just $ Types.toHeader contentType, Just contentRange
                   , Just $
                       contentLocationH
-                        tName
+                        (Types.qiName identifier)
                         (ApiRequest.iCanonicalQS apiRequest)
                   , profileH apiRequest
                   ]
@@ -656,8 +655,11 @@ handleInvoke conf dbStructure invMethod rawContentTypes contentType apiRequest p
 
     tName =
       fromMaybe pdName $ Types.procTableName proc
+
+    identifier =
+      Types.QualifiedIdentifier pdSchema tName
   in
-  case readSqlParts pdSchema tName conf dbStructure apiRequest rawContentTypes contentType of
+  case readSqlParts conf dbStructure apiRequest rawContentTypes contentType identifier of
     Left errorResponse -> return errorResponse
     Right (q, cq, bField, returning) -> do
       let
@@ -853,22 +855,21 @@ profileH apiRequest =
 
 
 readSqlParts
-  :: Text
-  -> Text
-  -> Config.AppConfig
+  :: Config.AppConfig
   -> Types.DbStructure
   -> ApiRequest.ApiRequest
   -> [Types.ContentType]
   -> Types.ContentType
+  -> Types.QualifiedIdentifier
   -> Either
        Wai.Response
        (Hasql.Snippet, Hasql.Snippet, Maybe Types.FieldName, [Types.FieldName])
-readSqlParts schema name conf dbStructure apiRequest rawContentTypes contentType =
+readSqlParts conf dbStructure apiRequest rawContentTypes contentType identifier=
   let
     readReq =
       DbRequestBuilder.readRequest
-        schema
-        name
+        (Types.qiSchema identifier)
+        (Types.qiName identifier)
         (Config.configDbMaxRows conf)
         (Types.dbRelations dbStructure)
         apiRequest
