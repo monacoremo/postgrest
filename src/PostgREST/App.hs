@@ -9,10 +9,6 @@ Some of its functionality includes:
 - Producing HTTP Headers according to RFCs.
 - Content Negotiation
 -}
-{-# LANGUAGE FlexibleContexts    #-}
-{-# LANGUAGE NamedFieldPuns      #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
 module PostgREST.App (postgrest) where
 
 import Data.IORef (IORef, readIORef)
@@ -49,6 +45,7 @@ import qualified PostgREST.Types as Types
 import Protolude hiding (toS)
 import Protolude.Conv (toS)
 
+
 postgrest
   :: Types.LogLevel
   -> IORef Config.AppConfig
@@ -67,15 +64,18 @@ postgrest logLev refConf refDbStructure pool getTime connWorker =
     case maybeDbStructure of
       Nothing ->
         respond . Error.errorResponseFor $ Error.ConnectionLostError
-      Just dbStructure -> do
-        response <-
-          postgrestResponse time body dbStructure conf pool req
 
-        -- Launch the connWorker when the connection is down.
-        -- The postgrest function can respond successfully (with a stale schema
-        -- cache) before the connWorker is done.
-        when (Wai.responseStatus response == HTTP.status503) connWorker
-        respond response
+      Just dbStructure ->
+        do
+          response <-
+            postgrestResponse time body dbStructure conf pool req
+
+          -- Launch the connWorker when the connection is down.
+          -- The postgrest function can respond successfully (with a stale schema
+          -- cache) before the connWorker is done.
+          when (Wai.responseStatus response == HTTP.status503) connWorker
+          respond response
+
 
 postgrestResponse
   :: UTCTime
@@ -240,7 +240,8 @@ handleRequest dbStructure conf apiRequest rawContentTypes contentType =
     (ApiRequest.ActionInspect headersOnly, ApiRequest.TargetDefaultSpec tSchema) ->
       handleOpenApi conf dbStructure apiRequest headersOnly tSchema
 
-    _ -> return notFound
+    _ ->
+      return notFound
 
 
 handleRead
