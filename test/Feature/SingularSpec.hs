@@ -70,8 +70,7 @@ spec =
           `shouldRespondWith`
             [json|{"details":"Results contain 4 rows, application/vnd.pgrst.object+json requires 1 row","message":"JSON object requested, multiple (or no) rows returned"}|]
             { matchStatus  = 406
-            , matchHeaders = [ matchContentTypeSingular
-                             , "Preference-Applied" <:> "tx=commit" ]
+            , matchHeaders = [ matchContentTypeSingular ]
             }
 
         -- the rows should not be updated, either
@@ -86,8 +85,7 @@ spec =
           `shouldRespondWith`
             [json|{"details":"Results contain 4 rows, application/vnd.pgrst.object+json requires 1 row","message":"JSON object requested, multiple (or no) rows returned"}|]
             { matchStatus  = 406
-            , matchHeaders = [ matchContentTypeSingular
-                             , "Preference-Applied" <:> "tx=commit" ]
+            , matchHeaders = [ matchContentTypeSingular ]
             }
 
         -- the rows should not be updated, either
@@ -140,8 +138,7 @@ spec =
           `shouldRespondWith`
             [json|{"details":"Results contain 2 rows, application/vnd.pgrst.object+json requires 1 row","message":"JSON object requested, multiple (or no) rows returned"}|]
             { matchStatus  = 406
-            , matchHeaders = [ matchContentTypeSingular
-                             , "Preference-Applied" <:> "tx=commit" ]
+            , matchHeaders = [ matchContentTypeSingular ]
             }
 
         -- the rows should not exist, either
@@ -156,8 +153,7 @@ spec =
           `shouldRespondWith`
             [json|{"details":"Results contain 2 rows, application/vnd.pgrst.object+json requires 1 row","message":"JSON object requested, multiple (or no) rows returned"}|]
             { matchStatus  = 406
-            , matchHeaders = [ matchContentTypeSingular
-                             , "Preference-Applied" <:> "tx=commit" ]
+            , matchHeaders = [ matchContentTypeSingular ]
             }
 
         -- the rows should not exist, either
@@ -172,8 +168,7 @@ spec =
           `shouldRespondWith`
             [json|{"details":"Results contain 2 rows, application/vnd.pgrst.object+json requires 1 row","message":"JSON object requested, multiple (or no) rows returned"}|]
             { matchStatus  = 406
-            , matchHeaders = [ matchContentTypeSingular
-                             , "Preference-Applied" <:> "tx=commit" ]
+            , matchHeaders = [ matchContentTypeSingular ]
             }
 
         -- the rows should not exist, either
@@ -221,8 +216,7 @@ spec =
           `shouldRespondWith`
             [json|{"details":"Results contain 5 rows, application/vnd.pgrst.object+json requires 1 row","message":"JSON object requested, multiple (or no) rows returned"}|]
             { matchStatus  = 406
-            , matchHeaders = [ matchContentTypeSingular
-                             , "Preference-Applied" <:> "tx=commit" ]
+            , matchHeaders = [ matchContentTypeSingular ]
             }
 
         -- the rows should still exist
@@ -239,8 +233,7 @@ spec =
           `shouldRespondWith`
             [json|{"details":"Results contain 5 rows, application/vnd.pgrst.object+json requires 1 row","message":"JSON object requested, multiple (or no) rows returned"}|]
             { matchStatus  = 406
-            , matchHeaders = [ matchContentTypeSingular
-                             , "Preference-Applied" <:> "tx=commit" ]
+            , matchHeaders = [ matchContentTypeSingular ]
             }
 
         -- the rows should still exist
@@ -313,8 +306,7 @@ spec =
           `shouldRespondWith`
             [json|{"details":"Results contain 2 rows, application/vnd.pgrst.object+json requires 1 row","message":"JSON object requested, multiple (or no) rows returned"}|]
             { matchStatus  = 406
-            , matchHeaders = [ matchContentTypeSingular
-                             , "Preference-Applied" <:> "tx=commit" ]
+            , matchHeaders = [ matchContentTypeSingular ]
             }
 
         -- should rollback function

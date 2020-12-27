@@ -2,11 +2,14 @@
 Module      : PostgREST.Middleware
 Description : Sets CORS policy. Also the PostgreSQL GUCs, role, search_path and pre-request function.
 -}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
-{-# LANGUAGE FlexibleContexts    #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-
-module PostgREST.Middleware where
+module PostgREST.Middleware
+  ( runPgLocals
+  , pgrstFormat
+  , pgrstMiddleware
+  , defaultCorsPolicy
+  , corsPolicy
+  , optionalRollback
+  ) where
 
 import qualified Hasql.Decoders                    as HD
 import qualified Hasql.DynamicStatements.Statement as H
@@ -23,8 +26,10 @@ import           Data.Scientific           (FPFormat (..),
                                             isInteger)
 import qualified Data.Text                 as T
 import qualified Hasql.Transaction         as H
+import qualified Network.HTTP.Types.Header as HTTP
 import           Network.HTTP.Types.Status (Status, status400,
                                             status500, statusCode)
+import qualified Network.Wai               as Wai
 import           Network.Wai.Logger        (showSockAddr)
 import           System.Log.FastLogger     (toLogStr)
 
@@ -35,8 +40,11 @@ import Network.Wai.Middleware.Gzip          (def, gzip)
 import Network.Wai.Middleware.RequestLogger
 import Network.Wai.Middleware.Static        (only, staticPolicy)
 
+import qualified PostgREST.Types as Types
+
 import PostgREST.ApiRequest   (ApiRequest (..))
 import PostgREST.Config       (AppConfig (..))
+import PostgREST.Error        (Error)
 import PostgREST.QueryBuilder (setConfigLocal)
 import PostgREST.Types        (LogLevel (..))
 import Protolude              hiding (head, toS)
@@ -45,13 +53,13 @@ import System.IO.Unsafe       (unsafePerformIO)
 
 -- | Runs local(transaction scoped) GUCs for every request, plus the pre-request function
 runPgLocals :: AppConfig   -> M.HashMap Text JSON.Value ->
-               (ApiRequest -> H.Transaction Response) ->
-               ApiRequest  -> H.Transaction Response
+               (ApiRequest -> ExceptT Error H.Transaction Response) ->
+               ApiRequest  -> ExceptT Error H.Transaction Response
 runPgLocals conf claims app req = do
-  H.statement mempty $ H.dynamicallyParameterized
+  lift $ H.statement mempty $ H.dynamicallyParameterized
     ("select " <> intercalateSnippet ", " (searchPathSql : roleSql ++ claimsSql ++ [methodSql, pathSql] ++ headersSql ++ cookiesSql ++ appSettingsSql))
     HD.noResult (configDbPreparedStatements conf)
-  traverse_ H.sql preReqSql
+  lift $ traverse_ H.sql preReqSql
   app req
   where
     methodSql = setConfigLocal mempty ("request.method", toS $ iMethod req)
@@ -140,3 +148,36 @@ unquoted (JSON.Number n) =
   toS $ formatScientific Fixed (if isInteger n then Just 0 else Nothing) n
 unquoted (JSON.Bool b) = show b
 unquoted v = toS $ JSON.encode v
+
+-- |
+-- Set a transaction to eventually roll back if requested and set respective
+-- headers on the response.
+optionalRollback
+  :: AppConfig
+  -> ApiRequest
+  -> ExceptT Error H.Transaction Wai.Response
+  -> ExceptT Error H.Transaction Wai.Response
+optionalRollback conf apiRequest transaction =
+  let
+    prefer = iPreferTransaction apiRequest
+    allowOverride = configDbTxAllowOverride conf
+    shouldCommit = allowOverride && prefer == Just Types.Commit
+    shouldRollback = allowOverride && prefer == Just Types.Rollback
+
+    preferenceApplied
+      | shouldCommit =
+          Types.addHeadersIfNotIncluded
+            [(HTTP.hPreferenceApplied, BS.pack (show Types.Commit))]
+      | shouldRollback =
+          Types.addHeadersIfNotIncluded
+            [(HTTP.hPreferenceApplied, BS.pack (show Types.Rollback))]
+      | otherwise =
+          identity
+  in
+  do
+    resp <- transaction
+
+    when (shouldRollback || (configDbTxRollbackAll conf && not shouldCommit))
+      (lift H.condemn)
+
+    return $ Wai.mapResponseHeaders preferenceApplied resp
