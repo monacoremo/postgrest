@@ -220,11 +220,11 @@ handleRequest dbStructure conf apiRequest rawContentTypes contentType =
     (ApiRequest.ActionRead headersOnly, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tName)) ->
       handleRead conf dbStructure apiRequest headersOnly rawContentTypes contentType tSchema tName
 
-    (ApiRequest.ActionCreate, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tName)) ->
-      handleCreate conf dbStructure apiRequest contentType tSchema tName
+    (ApiRequest.ActionCreate, ApiRequest.TargetIdent identifier) ->
+      handleCreate conf dbStructure apiRequest contentType identifier
 
-    (ApiRequest.ActionUpdate, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tName)) ->
-      handleUpdate conf dbStructure apiRequest contentType tSchema tName
+    (ApiRequest.ActionUpdate, ApiRequest.TargetIdent identifier) ->
+      handleUpdate conf dbStructure apiRequest contentType identifier
 
     (ApiRequest.ActionSingleUpsert, ApiRequest.TargetIdent (Types.QualifiedIdentifier tSchema tName)) ->
       handleSingleUpsert conf dbStructure apiRequest contentType tSchema tName
@@ -242,6 +242,7 @@ handleRequest dbStructure conf apiRequest rawContentTypes contentType =
       handleOpenApi conf dbStructure apiRequest headersOnly tSchema
 
     _ -> return notFound
+
 
 handleRead
   :: Config.AppConfig
@@ -333,21 +334,25 @@ handleRead conf dbStructure apiRequest headersOnly rawContentTypes contentType t
             else
               Wai.responseLBS status headers rBody
 
+
 handleCreate
   :: Config.AppConfig
   -> Types.DbStructure
   -> ApiRequest.ApiRequest
   -> Types.ContentType
-  -> Text
-  -> Text
+  -> Types.QualifiedIdentifier
   -> Hasql.Transaction Wai.Response
-handleCreate conf dbStructure apiRequest contentType tSchema tName =
-  case mutateSqlParts tSchema tName conf dbStructure apiRequest of
+handleCreate conf dbStructure apiRequest contentType identifier =
+  case mutateSqlParts (Types.qiSchema identifier) (Types.qiName identifier) conf dbStructure apiRequest of
     Left errorResponse -> return errorResponse
     Right (sq, mq) -> do
       let
         pkCols =
-          Types.tablePKCols dbStructure tSchema tName
+          Types.tablePKCols
+            dbStructure
+            (Types.qiSchema identifier)
+            (Types.qiName identifier)
+
         stm =
           Statements.createWriteStatement
             sq
@@ -385,7 +390,7 @@ handleCreate conf dbStructure apiRequest contentType tSchema tName =
                   [ if null fields then
                       Nothing
                     else
-                      Just $ locationH tName fields
+                      Just $ locationH (Types.qiName identifier) fields
                   , Just $
                       RangeQuery.contentRangeH
                         1
@@ -405,16 +410,17 @@ handleCreate conf dbStructure apiRequest contentType tSchema tName =
               return . Error.errorResponseFor . Error.singularityError $ queryTotal
           else
             return $ Wai.responseLBS status headers rBody
+
+
 handleUpdate
   :: Config.AppConfig
   -> Types.DbStructure
   -> ApiRequest.ApiRequest
   -> Types.ContentType
-  -> Text
-  -> Text
+  -> Types.QualifiedIdentifier
   -> Hasql.Transaction Wai.Response
-handleUpdate conf dbStructure apiRequest contentType tSchema tName =
-  case mutateSqlParts tSchema tName conf dbStructure apiRequest of
+handleUpdate conf dbStructure apiRequest contentType identifier =
+  case mutateSqlParts (Types.qiSchema identifier) (Types.qiName identifier) conf dbStructure apiRequest of
     Left errorResponse ->
       return errorResponse
 
