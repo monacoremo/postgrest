@@ -566,8 +566,10 @@ handleDelete conf dbStructure contentType apiRequest tSchema tName =
       let (_, queryTotal, _, body, gucHeaders, gucStatus) = row
           gucs =  (,) <$> gucHeaders <*> gucStatus
       case gucs of
-        Left err -> return $ Error.errorResponseFor err
-        Right (ghdrs, gstatus) -> do
+        Left err ->
+          return $ Error.errorResponseFor err
+
+        Right (ghdrs, gstatus) ->
           let
             defStatus =
               if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
@@ -592,7 +594,7 @@ handleDelete conf dbStructure contentType apiRequest tSchema tName =
               Types.addHeadersIfNotIncluded
                 (catMaybes ctHeaders ++ [contentRangeHeader])
                 (Types.unwrapGucHeader <$> ghdrs)
-
+          in
           if contentType == Types.CTSingularJSON && queryTotal /= 1 then
             do
               Hasql.condemn
@@ -638,81 +640,89 @@ handleInvoke
   -> Types.ProcDescription
   -> Hasql.Transaction Wai.Response
 handleInvoke conf dbStructure invMethod rawContentTypes contentType apiRequest proc =
+  let
+    pdName =
+      Types.pdName proc
+
+    pdSchema =
+      Types.pdSchema proc
+
+    tName =
+      fromMaybe pdName $ Types.procTableName proc
+  in
+  case readSqlParts pdSchema tName conf dbStructure apiRequest rawContentTypes contentType of
+    Left errorResponse -> return errorResponse
+    Right (q, cq, bField, returning) -> do
       let
-        pdName =
-          Types.pdName proc
+        preferParams =
+          ApiRequest.iPreferParameters apiRequest
 
-        pdSchema =
-          Types.pdSchema proc
+        pq =
+          QueryBuilder.requestToCallProcQuery
+            (Types.QualifiedIdentifier pdSchema pdName)
+            (Types.specifiedProcArgs (ApiRequest.iColumns apiRequest) proc)
+            (ApiRequest.iPayload apiRequest)
+            (returnsScalar apiRequest)
+            preferParams
+            returning
 
-        tName =
-          fromMaybe pdName $ Types.procTableName proc
-      in
-      case readSqlParts pdSchema tName conf dbStructure apiRequest rawContentTypes contentType of
-        Left errorResponse -> return errorResponse
-        Right (q, cq, bField, returning) -> do
+        stm =
+          Statements.callProcStatement
+            (returnsScalar apiRequest)
+            (returnsSingle apiRequest)
+            pq
+            q
+            cq
+            (shouldCount apiRequest)
+            (contentType == Types.CTSingularJSON)
+            (contentType == Types.CTTextCSV)
+            (preferParams == Just Types.MultipleObjects)
+            bField
+            (Types.pgVersion dbStructure)
+            (Config.configDbPreparedStatements conf)
+
+      row <- Hasql.statement mempty stm
+
+      let
+        (tableTotal, queryTotal, body, gucHeaders, gucStatus) =
+          row
+
+        gucs =
+          (,) <$> gucHeaders <*> gucStatus
+
+      case gucs of
+        Left err ->
+          return $ Error.errorResponseFor err
+
+        Right (ghdrs, gstatus) ->
           let
-            preferParams =
-              ApiRequest.iPreferParameters apiRequest
+            (rangeStatus, contentRange) =
+              RangeQuery.rangeStatusHeader
+                (topLevelRange apiRequest)
+                queryTotal
+                tableTotal
 
-            pq =
-              QueryBuilder.requestToCallProcQuery
-                (Types.QualifiedIdentifier pdSchema pdName)
-                (Types.specifiedProcArgs (ApiRequest.iColumns apiRequest) proc)
-                (ApiRequest.iPayload apiRequest)
-                (returnsScalar apiRequest)
-                preferParams
-                returning
+            status =
+              fromMaybe rangeStatus gstatus
 
-            stm =
-              Statements.callProcStatement
-                (returnsScalar apiRequest)
-                (returnsSingle apiRequest)
-                pq
-                q
-                cq
-                (shouldCount apiRequest)
-                (contentType == Types.CTSingularJSON)
-                (contentType == Types.CTTextCSV)
-                (preferParams == Just Types.MultipleObjects)
-                bField
-                (Types.pgVersion dbStructure)
-                (Config.configDbPreparedStatements conf)
+            headers =
+              Types.addHeadersIfNotIncluded
+                (catMaybes
+                  [ Just $ Types.toHeader contentType
+                  , Just contentRange, profileH apiRequest
+                  ]
+                )
+                (Types.unwrapGucHeader <$> ghdrs)
 
-          row <- Hasql.statement mempty stm
-
-          let
-            (tableTotal, queryTotal, body, gucHeaders, gucStatus) =
-              row
-
-            gucs =
-              (,) <$> gucHeaders <*> gucStatus
-
-          case gucs of
-            Left err ->
-              return $ Error.errorResponseFor err
-
-            Right (ghdrs, gstatus) -> do
-              let
-                (rangeStatus, contentRange) =
-                  RangeQuery.rangeStatusHeader (topLevelRange apiRequest) queryTotal tableTotal
-
-                status =
-                  fromMaybe rangeStatus gstatus
-
-                headers =
-                  Types.addHeadersIfNotIncluded
-                    (catMaybes [Just $ Types.toHeader contentType, Just contentRange, profileH apiRequest])
-                    (Types.unwrapGucHeader <$> ghdrs)
-
-                rBody =
-                  if invMethod == ApiRequest.InvHead then mempty else toS body
-              if contentType == Types.CTSingularJSON && queryTotal /= 1
-                then do
-                  Hasql.condemn
-                  return . Error.errorResponseFor . Error.singularityError $ queryTotal
-                else
-                  return $ Wai.responseLBS status headers rBody
+            rBody =
+              if invMethod == ApiRequest.InvHead then mempty else toS body
+          in
+          if contentType == Types.CTSingularJSON && queryTotal /= 1
+            then do
+              Hasql.condemn
+              return . Error.errorResponseFor . Error.singularityError $ queryTotal
+            else
+              return $ Wai.responseLBS status headers rBody
 
 
 handleOpenApi
