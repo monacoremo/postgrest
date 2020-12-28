@@ -185,7 +185,8 @@ handleRequest
 handleRequest dbStructure conf contentType apiRequest =
   case (ApiRequest.iAction apiRequest, ApiRequest.iTarget apiRequest) of
     (ApiRequest.ActionRead headersOnly, ApiRequest.TargetIdent identifier) ->
-      handleRead conf dbStructure apiRequest headersOnly contentType identifier
+      either identity identity <$>
+        handleRead conf dbStructure apiRequest headersOnly contentType identifier
 
     (ApiRequest.ActionCreate, ApiRequest.TargetIdent identifier) ->
       handleCreate conf dbStructure apiRequest contentType identifier
@@ -220,11 +221,11 @@ handleRead
   -> Bool
   -> ContentType
   -> Types.QualifiedIdentifier
-  -> Hasql.Transaction Wai.Response
+  -> Hasql.Transaction (Either Wai.Response Wai.Response)
 handleRead conf dbStructure apiRequest headersOnly contentType identifier =
   case readRequest conf dbStructure identifier apiRequest of
     Left errorResponse ->
-      return errorResponse
+      return $ Left errorResponse
 
     Right req ->
       let
@@ -248,7 +249,7 @@ handleRead conf dbStructure apiRequest headersOnly contentType identifier =
       in
       case field of
         Left err ->
-          return err
+          return $ Left err
 
         Right bField ->
           let
@@ -265,14 +266,12 @@ handleRead conf dbStructure apiRequest headersOnly contentType identifier =
           in
           do
             (tableTotal, queryTotal, _ , body, gucHeaders, gucStatus) <-
-              Hasql.statement mempty stm
-            let
-              gucs =
-                (,) <$> gucHeaders <*> gucStatus
+              Hasql.statement mempty $ stm
 
-            case gucs of
+            case (,) <$> gucHeaders <*> gucStatus of
               Left err ->
-                return $ Error.errorResponseFor err
+                return . Left $ Error.errorResponseFor err
+
               Right (ghdrs, gstatus) -> do
                 total <- readTotal conf tableTotal apiRequest cq
                 let
@@ -281,9 +280,6 @@ handleRead conf dbStructure apiRequest headersOnly contentType identifier =
                       (ApiRequest.iTopLevelRange apiRequest)
                       queryTotal
                       total
-
-                  status =
-                    fromMaybe rangeStatus gstatus
 
                   headers =
                     Types.addHeadersIfNotIncluded
@@ -298,14 +294,11 @@ handleRead conf dbStructure apiRequest headersOnly contentType identifier =
                       )
                       (Types.unwrapGucHeader <$> ghdrs)
 
-                  rBody =
-                    if headersOnly then mempty else toS body
-
-                return $
-                  if contentType == Types.CTSingularJSON && queryTotal /= 1 then
-                    Error.errorResponseFor . Error.singularityError $ queryTotal
-                  else
-                    Wai.responseLBS status headers rBody
+                failNotSingular contentType queryTotal $
+                  Wai.responseLBS
+                    (fromMaybe rangeStatus gstatus)
+                    headers
+                    (if headersOnly then mempty else toS body)
 
 
 readTotal
@@ -695,7 +688,7 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
         Right bField ->
           do
             (tableTotal, queryTotal, body, gucHeaders, gucStatus) <-
-              invokeStatement conf dbStructure apiRequest req proc contentType bField
+              handleInvokeTransaction conf dbStructure apiRequest req proc contentType bField
 
             case (,) <$> gucHeaders <*> gucStatus of
               Left err ->
@@ -713,7 +706,8 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
                     Types.addHeadersIfNotIncluded
                       (catMaybes
                         [ Just $ Types.toHeader contentType
-                        , Just contentRange, profileH apiRequest
+                        , Just contentRange
+                        , profileH apiRequest
                         ]
                       )
                       (Types.unwrapGucHeader <$> ghdrs)
@@ -725,7 +719,7 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
                     (if invMethod == ApiRequest.InvHead then mempty else toS body)
 
 
-invokeStatement
+handleInvokeTransaction
   :: AppConfig
   -> DbStructure
   -> ApiRequest
@@ -734,7 +728,7 @@ invokeStatement
   -> ContentType
   -> Maybe Types.FieldName
   -> Hasql.Transaction Statements.ProcResults
-invokeStatement conf dbStructure apiRequest req proc contentType bField =
+handleInvokeTransaction conf dbStructure apiRequest req proc contentType bField =
   let
     pq =
       QueryBuilder.requestToCallProcQuery
@@ -807,6 +801,7 @@ handleOpenApi conf dbStructure apiRequest headersOnly tSchema =
         (catMaybes [Just $ Types.toHeader Types.CTOpenAPI, profileH apiRequest])
         (if headersOnly then mempty else toS body)
 
+
 -- Should be obsolete when Table and Column types are refactored
 openApiTableInfo :: DbStructure -> Types.Table -> (Types.Table, [Types.Column], [Text])
 openApiTableInfo dbStructure table =
@@ -825,7 +820,7 @@ openApiTableInfo dbStructure table =
 
 notFound :: Wai.Response
 notFound =
-  Wai.responseLBS HTTP.status404 [] ""
+  Wai.responseLBS HTTP.status404 [] mempty
 
 
 estimatedCount :: ApiRequest -> Bool
