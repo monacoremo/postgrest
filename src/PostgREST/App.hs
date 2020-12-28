@@ -625,16 +625,7 @@ handleDelete conf dbStructure contentType apiRequest identifier =
 
 handleInfo :: DbStructure -> Types.QualifiedIdentifier -> Wai.Response
 handleInfo dbStructure identifier =
-  let
-    mTable =
-      find
-        (\t ->
-          Types.tableName t == Types.qiName identifier
-          && Types.tableSchema t == Types.qiSchema identifier
-        )
-        (Types.dbTables dbStructure)
-  in
-  case mTable of
+  case findTable dbStructure identifier of
     Nothing ->
       notFound
 
@@ -647,10 +638,21 @@ handleInfo dbStructure identifier =
             else
               "GET"
           )
+
         allOrigins =
           ("Access-Control-Allow-Origin", "*") :: HTTP.Header
       in
       Wai.responseLBS HTTP.status200 [allOrigins, allowH] mempty
+
+
+findTable :: DbStructure -> Types.QualifiedIdentifier -> Maybe Types.Table
+findTable dbStructure identifier =
+  find
+    (\t ->
+      Types.tableName t == Types.qiName identifier
+      && Types.tableSchema t == Types.qiSchema identifier
+    )
+    (Types.dbTables dbStructure)
 
 
 handleInvoke
