@@ -241,10 +241,32 @@ handleRead
   -> Types.QualifiedIdentifier
   -> Hasql.Transaction Wai.Response
 handleRead conf dbStructure apiRequest headersOnly contentType identifier =
-  case readSqlParts conf dbStructure apiRequest contentType identifier of
+  let
+    readReq =
+      DbRequestBuilder.readRequest
+        (Types.qiSchema identifier)
+        (Types.qiName identifier)
+        (Config.configDbMaxRows conf)
+        (Types.dbRelations dbStructure)
+        apiRequest
+  in
+  case readReq of
     Left errorResponse -> return errorResponse
-    Right (q, cq, bField, _) ->
+    Right req ->
       let
+        q =
+          QueryBuilder.readRequestToQuery req
+
+        cq =
+          QueryBuilder.readRequestToCountQuery req
+
+        field =
+          binaryField
+            contentType
+            (rawContentTypes conf)
+            (returnsScalar apiRequest)
+            req
+
         cQuery =
           if estimatedCount apiRequest then
             -- LIMIT maxRows + 1 so we can determine below that maxRows
@@ -252,57 +274,61 @@ handleRead conf dbStructure apiRequest headersOnly contentType identifier =
             QueryBuilder.limitedQuery cq ((+ 1) <$> Config.configDbMaxRows conf)
           else
             cq
-
-        stm =
-          Statements.createReadStatement
-            q
-            cQuery
-            (contentType == Types.CTSingularJSON)
-            (shouldCount apiRequest)
-            (contentType == Types.CTTextCSV)
-            bField
-            (Types.pgVersion dbStructure)
-            (Config.configDbPreparedStatements conf)
       in
-      do
-        (tableTotal, queryTotal, _ , body, gucHeaders, gucStatus) <-
-          Hasql.statement mempty stm
-        let
-          gucs =
-            (,) <$> gucHeaders <*> gucStatus
-
-        case gucs of
-          Left err ->
-            return $ Error.errorResponseFor err
-          Right (ghdrs, gstatus) -> do
-            total <- readTotal conf tableTotal apiRequest cq
+      case field of
+        Left err -> return err
+        Right bField ->
+          let
+            stm =
+              Statements.createReadStatement
+                q
+                cQuery
+                (contentType == Types.CTSingularJSON)
+                (shouldCount apiRequest)
+                (contentType == Types.CTTextCSV)
+                bField
+                (Types.pgVersion dbStructure)
+                (Config.configDbPreparedStatements conf)
+          in
+          do
+            (tableTotal, queryTotal, _ , body, gucHeaders, gucStatus) <-
+              Hasql.statement mempty stm
             let
-              (rangeStatus, contentRange) =
-                RangeQuery.rangeStatusHeader (ApiRequest.iTopLevelRange apiRequest) queryTotal total
+              gucs =
+                (,) <$> gucHeaders <*> gucStatus
 
-              status =
-                fromMaybe rangeStatus gstatus
+            case gucs of
+              Left err ->
+                return $ Error.errorResponseFor err
+              Right (ghdrs, gstatus) -> do
+                total <- readTotal conf tableTotal apiRequest cq
+                let
+                  (rangeStatus, contentRange) =
+                    RangeQuery.rangeStatusHeader (ApiRequest.iTopLevelRange apiRequest) queryTotal total
 
-              headers =
-                Types.addHeadersIfNotIncluded
-                  (catMaybes
-                    [ Just $ Types.toHeader contentType, Just contentRange
-                    , Just $
-                        contentLocationH
-                          (Types.qiName identifier)
-                          (ApiRequest.iCanonicalQS apiRequest)
-                    , profileH apiRequest
-                    ]
-                  )
-                  (Types.unwrapGucHeader <$> ghdrs)
+                  status =
+                    fromMaybe rangeStatus gstatus
 
-              rBody =
-                if headersOnly then mempty else toS body
-            return $
-              if contentType == Types.CTSingularJSON && queryTotal /= 1 then
-                Error.errorResponseFor . Error.singularityError $ queryTotal
-              else
-                Wai.responseLBS status headers rBody
+                  headers =
+                    Types.addHeadersIfNotIncluded
+                      (catMaybes
+                        [ Just $ Types.toHeader contentType, Just contentRange
+                        , Just $
+                            contentLocationH
+                              (Types.qiName identifier)
+                              (ApiRequest.iCanonicalQS apiRequest)
+                        , profileH apiRequest
+                        ]
+                      )
+                      (Types.unwrapGucHeader <$> ghdrs)
+
+                  rBody =
+                    if headersOnly then mempty else toS body
+                return $
+                  if contentType == Types.CTSingularJSON && queryTotal /= 1 then
+                    Error.errorResponseFor . Error.singularityError $ queryTotal
+                  else
+                    Wai.responseLBS status headers rBody
 
 
 readTotal
@@ -825,11 +851,6 @@ notFound =
   Wai.responseLBS HTTP.status404 [] ""
 
 
-exactCount :: ApiRequest -> Bool
-exactCount apiRequest =
-  ApiRequest.iPreferCount apiRequest == Just Types.ExactCount
-
-
 estimatedCount :: ApiRequest -> Bool
 estimatedCount apiRequest =
   ApiRequest.iPreferCount apiRequest == Just Types.EstimatedCount
@@ -837,7 +858,11 @@ estimatedCount apiRequest =
 
 shouldCount :: ApiRequest -> Bool
 shouldCount apiRequest =
-  exactCount apiRequest || estimatedCount apiRequest
+  let
+    exactCount =
+      ApiRequest.iPreferCount apiRequest == Just Types.ExactCount
+  in
+  exactCount || estimatedCount apiRequest
 
 
 returnsScalar :: ApiRequest -> Bool
