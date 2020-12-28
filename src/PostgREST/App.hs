@@ -69,7 +69,7 @@ postgrest logLev refConf refDbStructure pool getTime connWorker =
       Just dbStructure ->
         do
           response <-
-            postgrestResponse time body dbStructure conf pool req
+            postgrestResponse dbStructure conf pool time req body
 
           -- Launch the connWorker when the connection is down.
           -- The postgrest function can respond successfully (with a stale schema
@@ -80,14 +80,14 @@ postgrest logLev refConf refDbStructure pool getTime connWorker =
 
 
 postgrestResponse
-  :: UTCTime
-  -> LazyByteString.ByteString
-  -> Types.DbStructure
+  :: Types.DbStructure
   -> Config.AppConfig
   -> Hasql.Pool
+  -> UTCTime
   -> Wai.Request
+  -> LazyByteString.ByteString
   -> IO Wai.Response
-postgrestResponse time body dbStructure conf pool req =
+postgrestResponse dbStructure conf pool time req body =
   let
     apiReq =
       ApiRequest.userApiRequest
@@ -101,20 +101,34 @@ postgrestResponse time body dbStructure conf pool req =
     Left err ->
       return . Error.errorResponseFor $ err
 
-    Right apiRequest -> do
-      -- The jwt must be checked before touching the db.
-      attempt <-
-        Auth.attemptJwtClaims
-          (Config.configJWKS conf)
-          (Config.configJwtAudience conf)
-          (toS $ ApiRequest.iJWT apiRequest)
-          time
-          (rightToMaybe $ Config.configJwtRoleClaimKey conf)
-      case Auth.jwtClaims attempt of
-        Left errJwt ->
-          return . Error.errorResponseFor $ errJwt
-        Right claims ->
-          postgrestResponseWithClaims conf pool dbStructure apiRequest claims
+    Right apiRequest ->
+      do
+        -- The jwt must be checked before touching the db.
+        claims <- jwtClaims conf apiRequest time
+        case claims of
+          Left err ->
+            return . Error.errorResponseFor $ err
+          Right clms ->
+            postgrestResponseWithClaims conf pool dbStructure apiRequest clms
+
+
+type JWTClaims =
+  HashMap.HashMap Text Aeson.Value
+
+
+jwtClaims
+  :: Config.AppConfig
+  -> ApiRequest.ApiRequest
+  -> UTCTime
+  -> IO (Either Error.SimpleError JWTClaims)
+jwtClaims conf apiRequest time =
+  Auth.jwtClaims <$>
+    Auth.attemptJwtClaims
+      (Config.configJWKS conf)
+      (Config.configJwtAudience conf)
+      (toS $ ApiRequest.iJWT apiRequest)
+      time
+      (rightToMaybe $ Config.configJwtRoleClaimKey conf)
 
 
 postgrestResponseWithClaims
@@ -122,9 +136,36 @@ postgrestResponseWithClaims
   -> Hasql.Pool
   -> Types.DbStructure
   -> ApiRequest.ApiRequest
-  -> HashMap.HashMap Text Aeson.Value
+  -> JWTClaims
   -> IO Wai.Response
 postgrestResponseWithClaims conf pool dbStructure apiRequest claims =
+  let
+    transaction =
+      optionalRollback conf apiRequest $
+        Middleware.runPgLocals
+          conf
+          claims
+          (app dbStructure conf)
+          apiRequest
+  in
+  do
+    dbResp <-
+      Hasql.use pool $
+        Hasql.transaction Hasql.ReadCommitted (txMode apiRequest) transaction
+
+    return $
+      either
+        (Error.errorResponseFor . Error.PgError (Auth.containsRole claims))
+        identity
+        dbResp
+
+
+optionalRollback
+  :: Config.AppConfig
+  -> ApiRequest.ApiRequest
+  -> Hasql.Transaction Wai.Response
+  -> Hasql.Transaction Wai.Response
+optionalRollback conf apiRequest transaction =
   let
     shouldCommit =
       Config.configDbTxAllowOverride conf
@@ -143,29 +184,12 @@ postgrestResponseWithClaims conf pool dbStructure apiRequest claims =
             [(HTTP.hPreferenceApplied, Char8ByteString.pack (show Types.Rollback))]
       | otherwise =
           identity
-
-    handleReq =
-      do
-        when (shouldRollback || (Config.configDbTxRollbackAll conf && not shouldCommit))
-          Hasql.condemn
-
-        Wai.mapResponseHeaders preferenceApplied <$>
-          Middleware.runPgLocals
-            conf
-            claims
-            (app dbStructure conf)
-            apiRequest
   in
   do
-    dbResp <-
-      Hasql.use pool $
-        Hasql.transaction Hasql.ReadCommitted (txMode apiRequest) handleReq
+    when (shouldRollback || (Config.configDbTxRollbackAll conf && not shouldCommit))
+      Hasql.condemn
 
-    return $
-      either
-        (Error.errorResponseFor . Error.PgError (Auth.containsRole claims))
-        identity
-        dbResp
+    Wai.mapResponseHeaders preferenceApplied <$> transaction
 
 
 txMode :: ApiRequest.ApiRequest -> Hasql.Mode
@@ -1000,10 +1024,8 @@ defaultContentTypes =
   [Types.CTApplicationJSON, Types.CTSingularJSON, Types.CTTextCSV]
 
 
-{-
-  | If raw(binary) output is requested, check that ContentType is one of the admitted
-  | rawContentTypes and that`?select=...` contains only one field other than `*`
--}
+-- | If raw(binary) output is requested, check that ContentType is one of the admitted
+-- rawContentTypes and that`?select=...` contains only one field other than `*`
 binaryField ::
   Types.ContentType
   -> [Types.ContentType]
