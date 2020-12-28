@@ -801,28 +801,7 @@ handleOpenApi conf dbStructure apiRequest headersOnly tSchema =
         (catMaybes [Just $ Types.toHeader Types.CTOpenAPI, profileH apiRequest])
         (if headersOnly then mempty else toS body)
 
-
-openApiUri :: AppConfig -> (Text, Text, Integer, Text)
-openApiUri conf =
-  let
-    maybeProxy =
-      OpenAPI.pickProxy $ toS <$> Config.configOpenApiServerProxyUri conf
-  in
-    case maybeProxy of
-      Just proxy ->
-        ( Types.proxyScheme proxy
-        , Types.proxyHost proxy
-        , Types.proxyPort proxy
-        , Types.proxyPath proxy
-        )
-      Nothing ->
-        ("http"
-        , Config.configServerHost conf
-        , toInteger $ Config.configServerPort conf
-        , "/"
-        )
-
-
+-- Should be obsolete when Table and Column types are refactored
 openApiTableInfo :: DbStructure -> Types.Table -> (Types.Table, [Types.Column], [Text])
 openApiTableInfo dbStructure table =
   let
@@ -1033,10 +1012,9 @@ profileH apiRequest =
 
 locationH :: Types.TableName -> [Char8ByteString.ByteString] -> HTTP.Header
 locationH tName fields =
-  let
-    locationFields = HTTP.renderSimpleQuery True $ splitKeyValue <$> fields
-  in
-    (HTTP.hLocation, "/" <> toS tName <> locationFields)
+  ( HTTP.hLocation
+  , "/" <> toS tName <> (HTTP.renderSimpleQuery True $ splitKeyValue <$> fields)
+  )
 
 
 splitKeyValue
@@ -1065,10 +1043,10 @@ contentProfileH schema =
 
 
 
--- MIDDLEWARE
+-- MIDDLEWARE - to be moved to Middleware.hs
 
 
--- | Set a transaction to eventuall roll back if requested and set respective
+-- | Set a transaction to eventually roll back if requested and set respective
 --   headers on the response.
 optionalRollback
   :: AppConfig
@@ -1100,3 +1078,28 @@ optionalRollback conf apiRequest transaction =
       Hasql.condemn
 
     Wai.mapResponseHeaders preferenceApplied <$> transaction
+
+
+
+-- CONFIG - to be moved to Config.hs
+
+
+openApiUri :: AppConfig -> (Text, Text, Integer, Text)
+openApiUri conf =
+  let
+    maybeProxy =
+      OpenAPI.pickProxy $ toS <$> Config.configOpenApiServerProxyUri conf
+  in
+    case maybeProxy of
+      Just proxy ->
+        ( Types.proxyScheme proxy
+        , Types.proxyHost proxy
+        , Types.proxyPort proxy
+        , Types.proxyPath proxy
+        )
+      Nothing ->
+        ("http"
+        , Config.configServerHost conf
+        , toInteger $ Config.configServerPort conf
+        , "/"
+        )
