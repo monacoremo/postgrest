@@ -17,7 +17,6 @@ import Data.Time.Clock (UTCTime)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Char8 as Char8ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
-import qualified Data.Ranged.Ranges as Ranges
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.List as List (union)
 import qualified Data.Set as Set
@@ -45,6 +44,10 @@ import qualified PostgREST.Types as Types
 
 import Protolude hiding (toS)
 import Protolude.Conv (toS)
+
+
+type JWTClaims =
+  HashMap.HashMap Text Aeson.Value
 
 
 postgrest
@@ -112,10 +115,6 @@ postgrestResponse dbStructure conf pool time req body =
             postgrestResponseWithClaims conf pool dbStructure apiRequest clms
 
 
-type JWTClaims =
-  HashMap.HashMap Text Aeson.Value
-
-
 jwtClaims
   :: Config.AppConfig
   -> ApiRequest.ApiRequest
@@ -160,38 +159,6 @@ postgrestResponseWithClaims conf pool dbStructure apiRequest claims =
         dbResp
 
 
-optionalRollback
-  :: Config.AppConfig
-  -> ApiRequest.ApiRequest
-  -> Hasql.Transaction Wai.Response
-  -> Hasql.Transaction Wai.Response
-optionalRollback conf apiRequest transaction =
-  let
-    shouldCommit =
-      Config.configDbTxAllowOverride conf
-      && ApiRequest.iPreferTransaction apiRequest == Just Types.Commit
-
-    shouldRollback =
-      Config.configDbTxAllowOverride conf
-      && ApiRequest.iPreferTransaction apiRequest == Just Types.Rollback
-
-    preferenceApplied
-      | shouldCommit =
-          Types.addHeadersIfNotIncluded
-            [(HTTP.hPreferenceApplied, Char8ByteString.pack (show Types.Commit))]
-      | shouldRollback =
-          Types.addHeadersIfNotIncluded
-            [(HTTP.hPreferenceApplied, Char8ByteString.pack (show Types.Rollback))]
-      | otherwise =
-          identity
-  in
-  do
-    when (shouldRollback || (Config.configDbTxRollbackAll conf && not shouldCommit))
-      Hasql.condemn
-
-    Wai.mapResponseHeaders preferenceApplied <$> transaction
-
-
 txMode :: ApiRequest.ApiRequest -> Hasql.Mode
 txMode apiRequest =
   case (ApiRequest.iAction apiRequest, ApiRequest.iTarget apiRequest) of
@@ -209,7 +176,8 @@ txMode apiRequest =
       Hasql.Read
     (ApiRequest.ActionInvoke ApiRequest.InvPost, ApiRequest.TargetProc Types.ProcDescription{Types.pdVolatility=Types.Immutable} _) ->
       Hasql.Read
-    _ -> Hasql.Write
+    _ ->
+      Hasql.Write
 
 app
   :: Types.DbStructure
@@ -217,38 +185,24 @@ app
   -> ApiRequest.ApiRequest
   -> Hasql.Transaction Wai.Response
 app dbStructure conf apiRequest =
-  let
-    rawContentTypes =
-      (Types.decodeContentType <$> Config.configRawMediaTypes conf)
-      `List.union`
-      [ Types.CTOctetStream, Types.CTTextPlain ]
-
-    contentTypeOrError =
-      responseContentTypeOrError
-        (ApiRequest.iAccepts apiRequest)
-        rawContentTypes
-        (ApiRequest.iAction apiRequest)
-        (ApiRequest.iTarget apiRequest)
-  in
-  case contentTypeOrError of
-    Left errorResponse ->
-      return errorResponse
+  case responseContentType conf apiRequest of
+    Left err ->
+      return $ Error.errorResponseFor err
 
     Right contentType ->
-      handleRequest dbStructure conf apiRequest rawContentTypes contentType
+      handleRequest dbStructure conf apiRequest contentType
 
 
 handleRequest
   :: Types.DbStructure
   -> Config.AppConfig
   -> ApiRequest.ApiRequest
-  -> [Types.ContentType]
   -> Types.ContentType
   -> Hasql.Transaction Wai.Response
-handleRequest dbStructure conf apiRequest rawContentTypes contentType =
+handleRequest dbStructure conf apiRequest contentType =
   case (ApiRequest.iAction apiRequest, ApiRequest.iTarget apiRequest) of
     (ApiRequest.ActionRead headersOnly, ApiRequest.TargetIdent identifier) ->
-      handleRead conf dbStructure apiRequest headersOnly rawContentTypes contentType identifier
+      handleRead conf dbStructure apiRequest headersOnly contentType identifier
 
     (ApiRequest.ActionCreate, ApiRequest.TargetIdent identifier) ->
       handleCreate conf dbStructure apiRequest contentType identifier
@@ -266,7 +220,7 @@ handleRequest dbStructure conf apiRequest rawContentTypes contentType =
       return $ handleInfo dbStructure identifier
 
     (ApiRequest.ActionInvoke invMethod, ApiRequest.TargetProc proc _) ->
-      handleInvoke conf dbStructure invMethod rawContentTypes contentType apiRequest proc
+      handleInvoke conf dbStructure invMethod contentType apiRequest proc
 
     (ApiRequest.ActionInspect headersOnly, ApiRequest.TargetDefaultSpec tSchema) ->
       handleOpenApi conf dbStructure apiRequest headersOnly tSchema
@@ -280,12 +234,11 @@ handleRead
   -> Types.DbStructure
   -> ApiRequest.ApiRequest
   -> Bool
-  -> [Types.ContentType]
   -> Types.ContentType
   -> Types.QualifiedIdentifier
   -> Hasql.Transaction Wai.Response
-handleRead conf dbStructure apiRequest headersOnly rawContentTypes contentType identifier =
-  case readSqlParts conf dbStructure apiRequest rawContentTypes contentType identifier of
+handleRead conf dbStructure apiRequest headersOnly contentType identifier =
+  case readSqlParts conf dbStructure apiRequest contentType identifier of
     Left errorResponse -> return errorResponse
     Right (q, cq, bField, _) ->
       let
@@ -322,7 +275,7 @@ handleRead conf dbStructure apiRequest headersOnly rawContentTypes contentType i
             total <- readTotal conf tableTotal apiRequest cq
             let
               (rangeStatus, contentRange) =
-                RangeQuery.rangeStatusHeader (topLevelRange apiRequest) queryTotal total
+                RangeQuery.rangeStatusHeader (ApiRequest.iTopLevelRange apiRequest) queryTotal total
 
               status =
                 fromMaybe rangeStatus gstatus
@@ -549,7 +502,7 @@ handleSingleUpsert conf dbStructure apiRequest contentType identifier =
       return errorResponse
 
     Right (sq, mq) ->
-      if topLevelRange apiRequest /= RangeQuery.allRange then
+      if ApiRequest.iTopLevelRange apiRequest /= RangeQuery.allRange then
         return . Error.errorResponseFor $ Error.PutRangeNotAllowedError
       else
         let
@@ -703,12 +656,11 @@ handleInvoke
   :: Config.AppConfig
   -> Types.DbStructure
   -> ApiRequest.InvokeMethod
-  -> [Types.ContentType]
   -> Types.ContentType
   -> ApiRequest.ApiRequest
   -> Types.ProcDescription
   -> Hasql.Transaction Wai.Response
-handleInvoke conf dbStructure invMethod rawContentTypes contentType apiRequest proc =
+handleInvoke conf dbStructure invMethod contentType apiRequest proc =
   let
     pdName =
       Types.pdName proc
@@ -722,7 +674,7 @@ handleInvoke conf dbStructure invMethod rawContentTypes contentType apiRequest p
     identifier =
       Types.QualifiedIdentifier pdSchema tName
   in
-  case readSqlParts conf dbStructure apiRequest rawContentTypes contentType identifier of
+  case readSqlParts conf dbStructure apiRequest contentType identifier of
     Left errorResponse ->
       return errorResponse
 
@@ -771,7 +723,7 @@ handleInvoke conf dbStructure invMethod rawContentTypes contentType apiRequest p
             let
               (rangeStatus, contentRange) =
                 RangeQuery.rangeStatusHeader
-                  (topLevelRange apiRequest)
+                  (ApiRequest.iTopLevelRange apiRequest)
                   queryTotal
                   tableTotal
 
@@ -885,11 +837,6 @@ shouldCount apiRequest =
   exactCount apiRequest || estimatedCount apiRequest
 
 
-topLevelRange :: ApiRequest.ApiRequest -> Ranges.Range Integer
-topLevelRange apiRequest =
-  ApiRequest.iTopLevelRange apiRequest
-
-
 returnsScalar :: ApiRequest.ApiRequest -> Bool
 returnsScalar apiRequest =
   case ApiRequest.iTarget apiRequest of
@@ -908,22 +855,16 @@ returnsSingle apiRequest =
       False
 
 
-profileH :: ApiRequest.ApiRequest -> Maybe HTTP.Header
-profileH apiRequest =
-  contentProfileH <$> ApiRequest.iProfile apiRequest
-
-
 readSqlParts
   :: Config.AppConfig
   -> Types.DbStructure
   -> ApiRequest.ApiRequest
-  -> [Types.ContentType]
   -> Types.ContentType
   -> Types.QualifiedIdentifier
   -> Either
        Wai.Response
        (Hasql.Snippet, Hasql.Snippet, Maybe Types.FieldName, [Types.FieldName])
-readSqlParts conf dbStructure apiRequest rawContentTypes contentType identifier=
+readSqlParts conf dbStructure apiRequest contentType identifier=
   let
     readReq =
       DbRequestBuilder.readRequest
@@ -940,7 +881,7 @@ readSqlParts conf dbStructure apiRequest rawContentTypes contentType identifier=
   (,,,) <$>
     (QueryBuilder.readRequestToQuery <$> readReq) <*>
     (QueryBuilder.readRequestToCountQuery <$> readReq) <*>
-    (binaryField contentType rawContentTypes (returnsScalar apiRequest) =<< readReq) <*>
+    (binaryField contentType (rawContentTypes conf) (returnsScalar apiRequest) =<< readReq) <*>
     (returnings =<< readReq)
 
 
@@ -973,23 +914,38 @@ mutateSqlParts conf dbStructure apiRequest identifier =
     (QueryBuilder.mutateRequestToQuery <$> mutReq)
 
 
-responseContentTypeOrError ::
-  [Types.ContentType]
-  -> [Types.ContentType]
-  -> ApiRequest.Action
-  -> ApiRequest.Target
-  -> Either Wai.Response Types.ContentType
-responseContentTypeOrError accepts rawContentTypes action target =
+
+-- CONTENT TYPES
+
+
+rawContentTypes :: Config.AppConfig -> [Types.ContentType]
+rawContentTypes conf =
+  (Types.decodeContentType <$> Config.configRawMediaTypes conf)
+  `List.union`
+  [ Types.CTOctetStream, Types.CTTextPlain ]
+
+
+responseContentType
+  :: Config.AppConfig
+  -> ApiRequest.ApiRequest
+  -> Either Error.SimpleError Types.ContentType
+responseContentType conf apiRequest =
   let
     produces =
-      requestContentTypes rawContentTypes action target
+      requestContentTypes
+        (rawContentTypes conf)
+        (ApiRequest.iAction apiRequest)
+        (ApiRequest.iTarget apiRequest)
+
+    accepts =
+      ApiRequest.iAccepts apiRequest
   in
   case ApiRequest.mutuallyAgreeable produces accepts of
-    Just ct ->
-      Right ct
+    Just contentType ->
+      Right contentType
 
     Nothing ->
-      Left . Error.errorResponseFor . Error.ContentTypeError . map Types.toMime $ accepts
+      Left . Error.ContentTypeError . map Types.toMime $ accepts
 
 
 requestContentTypes
@@ -997,10 +953,10 @@ requestContentTypes
   -> ApiRequest.Action
   -> ApiRequest.Target
   -> [Types.ContentType]
-requestContentTypes rawContentTypes action target =
+requestContentTypes contentTypes action target =
   case action of
     ApiRequest.ActionRead _ ->
-      defaultContentTypes ++ rawContentTypes
+      defaultContentTypes ++ contentTypes
     ApiRequest.ActionCreate ->
       defaultContentTypes
     ApiRequest.ActionUpdate ->
@@ -1009,7 +965,7 @@ requestContentTypes rawContentTypes action target =
       defaultContentTypes
     ApiRequest.ActionInvoke _ ->
       defaultContentTypes
-        ++ rawContentTypes
+        ++ contentTypes
         ++ [Types.CTOpenAPI | ApiRequest.tpIsRootSpec target]
     ApiRequest.ActionInspect _ ->
       [Types.CTOpenAPI, Types.CTApplicationJSON]
@@ -1025,17 +981,17 @@ defaultContentTypes =
 
 
 -- | If raw(binary) output is requested, check that ContentType is one of the admitted
--- rawContentTypes and that`?select=...` contains only one field other than `*`
+--   rawContentTypes and that`?select=...` contains only one field other than `*`
 binaryField ::
   Types.ContentType
   -> [Types.ContentType]
   -> Bool
   -> Types.ReadRequest
   -> Either Wai.Response (Maybe Types.FieldName)
-binaryField ct rawContentTypes isScalarProc readReq
-  | isScalarProc && ct `elem` rawContentTypes =
+binaryField ct contentTypes isScalarProc readReq
+  | isScalarProc && ct `elem` contentTypes =
       Right $ Just "pgrst_scalar"
-  | ct `elem` rawContentTypes =
+  | ct `elem` contentTypes =
       let
         fldNames =
           Types.fstFieldNames readReq
@@ -1047,7 +1003,17 @@ binaryField ct rawContentTypes isScalarProc readReq
         Right fieldName
       else
         Left . Error.errorResponseFor $ Error.BinaryFieldError ct
-  | otherwise = Right Nothing
+  | otherwise =
+      Right Nothing
+
+
+
+-- HEADERS
+
+
+profileH :: ApiRequest.ApiRequest -> Maybe HTTP.Header
+profileH apiRequest =
+  contentProfileH <$> ApiRequest.iProfile apiRequest
 
 
 locationH :: Types.TableName -> [Char8ByteString.ByteString] -> HTTP.Header
@@ -1081,3 +1047,41 @@ contentProfileH schema =
   ( "Content-Profile"
   , toS schema
   )
+
+
+
+-- MIDDLEWARE
+
+
+-- | Optionally set a transaction to roll back if requested and set respective
+--   headers on the response.
+optionalRollback
+  :: Config.AppConfig
+  -> ApiRequest.ApiRequest
+  -> Hasql.Transaction Wai.Response
+  -> Hasql.Transaction Wai.Response
+optionalRollback conf apiRequest transaction =
+  let
+    shouldCommit =
+      Config.configDbTxAllowOverride conf
+      && ApiRequest.iPreferTransaction apiRequest == Just Types.Commit
+
+    shouldRollback =
+      Config.configDbTxAllowOverride conf
+      && ApiRequest.iPreferTransaction apiRequest == Just Types.Rollback
+
+    preferenceApplied
+      | shouldCommit =
+          Types.addHeadersIfNotIncluded
+            [(HTTP.hPreferenceApplied, Char8ByteString.pack (show Types.Commit))]
+      | shouldRollback =
+          Types.addHeadersIfNotIncluded
+            [(HTTP.hPreferenceApplied, Char8ByteString.pack (show Types.Rollback))]
+      | otherwise =
+          identity
+  in
+  do
+    when (shouldRollback || (Config.configDbTxRollbackAll conf && not shouldCommit))
+      Hasql.condemn
+
+    Wai.mapResponseHeaders preferenceApplied <$> transaction
