@@ -203,7 +203,8 @@ handleRequest dbStructure conf contentType apiRequest =
       return $ handleInfo dbStructure identifier
 
     (ApiRequest.ActionInvoke invMethod, ApiRequest.TargetProc proc _) ->
-      handleInvoke conf dbStructure invMethod contentType apiRequest proc
+      either identity identity <$>
+        handleInvoke conf dbStructure invMethod contentType apiRequest proc
 
     (ApiRequest.ActionInspect headersOnly, ApiRequest.TargetDefaultSpec tSchema) ->
       handleOpenApi conf dbStructure apiRequest headersOnly tSchema
@@ -662,7 +663,7 @@ handleInvoke
   -> ContentType
   -> ApiRequest
   -> Types.ProcDescription
-  -> Hasql.Transaction Wai.Response
+  -> Hasql.Transaction (Either Wai.Response Wai.Response)
 handleInvoke conf dbStructure invMethod contentType apiRequest proc =
   let
     pdName =
@@ -678,7 +679,7 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
       Types.QualifiedIdentifier pdSchema tName
   in
   case readRequest conf dbStructure identifier apiRequest of
-    Left errorResponse -> return errorResponse
+    Left errorResponse -> return $ Left errorResponse
     Right req ->
       let
         returning =
@@ -698,7 +699,7 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
             req
       in
       case field of
-        Left err -> return err
+        Left err -> return $ Left err
         Right bField ->
           let
             preferParams =
@@ -738,7 +739,7 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
 
             case gucs of
               Left err ->
-                return $ Error.errorResponseFor err
+                return . Left $ Error.errorResponseFor err
 
               Right (ghdrs, gstatus) ->
                 let
@@ -766,9 +767,9 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
                 if contentType == Types.CTSingularJSON && queryTotal /= 1
                   then do
                     Hasql.condemn
-                    return . Error.errorResponseFor . Error.singularityError $ queryTotal
+                    return . Left . Error.errorResponseFor . Error.singularityError $ queryTotal
                   else
-                    return $ Wai.responseLBS status headers rBody
+                    return . Right $ Wai.responseLBS status headers rBody
 
 
 handleOpenApi
