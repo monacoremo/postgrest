@@ -702,81 +702,108 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
 
     identifier =
       Types.QualifiedIdentifier pdSchema tName
+
+    readReq =
+      DbRequestBuilder.readRequest
+        (Types.qiSchema identifier)
+        (Types.qiName identifier)
+        (Config.configDbMaxRows conf)
+        (Types.dbRelations dbStructure)
+        apiRequest
+
   in
-  case readSqlParts conf dbStructure apiRequest contentType identifier of
-    Left errorResponse ->
-      return errorResponse
-
-    Right (q, cq, bField, returning) ->
+  case readReq of
+    Left errorResponse -> return errorResponse
+    Right req ->
       let
-        preferParams =
-          ApiRequest.iPreferParameters apiRequest
+        returning =
+          DbRequestBuilder.returningCols req []
 
-        pq =
-          QueryBuilder.requestToCallProcQuery
-            (Types.QualifiedIdentifier pdSchema pdName)
-            (Types.specifiedProcArgs (ApiRequest.iColumns apiRequest) proc)
-            (ApiRequest.iPayload apiRequest)
-            (returnsScalar apiRequest)
-            preferParams
-            returning
+        q =
+          QueryBuilder.readRequestToQuery req
 
-        stm =
-          Statements.callProcStatement
+        cq =
+          QueryBuilder.readRequestToCountQuery req
+
+        field =
+          binaryField
+            contentType
+            (rawContentTypes conf)
             (returnsScalar apiRequest)
-            (returnsSingle apiRequest)
-            pq
-            q
-            cq
-            (shouldCount apiRequest)
-            (contentType == Types.CTSingularJSON)
-            (contentType == Types.CTTextCSV)
-            (preferParams == Just Types.MultipleObjects)
-            bField
-            (Types.pgVersion dbStructure)
-            (Config.configDbPreparedStatements conf)
+            req
       in
-      do
-        (tableTotal, queryTotal, body, gucHeaders, gucStatus) <-
-          Hasql.statement mempty stm
+      case field of
+        Left err -> return err
+        Right bField ->
+          let
+            preferParams =
+              ApiRequest.iPreferParameters apiRequest
 
-        let
-          gucs =
-            (,) <$> gucHeaders <*> gucStatus
+            pq =
+              QueryBuilder.requestToCallProcQuery
+                (Types.QualifiedIdentifier pdSchema pdName)
+                (Types.specifiedProcArgs (ApiRequest.iColumns apiRequest) proc)
+                (ApiRequest.iPayload apiRequest)
+                (returnsScalar apiRequest)
+                preferParams
+                returning
 
-        case gucs of
-          Left err ->
-            return $ Error.errorResponseFor err
+            stm =
+              Statements.callProcStatement
+                (returnsScalar apiRequest)
+                (returnsSingle apiRequest)
+                pq
+                q
+                cq
+                (shouldCount apiRequest)
+                (contentType == Types.CTSingularJSON)
+                (contentType == Types.CTTextCSV)
+                (preferParams == Just Types.MultipleObjects)
+                bField
+                (Types.pgVersion dbStructure)
+                (Config.configDbPreparedStatements conf)
+          in
+          do
+            (tableTotal, queryTotal, body, gucHeaders, gucStatus) <-
+              Hasql.statement mempty stm
 
-          Right (ghdrs, gstatus) ->
             let
-              (rangeStatus, contentRange) =
-                RangeQuery.rangeStatusHeader
-                  (ApiRequest.iTopLevelRange apiRequest)
-                  queryTotal
-                  tableTotal
+              gucs =
+                (,) <$> gucHeaders <*> gucStatus
 
-              status =
-                fromMaybe rangeStatus gstatus
+            case gucs of
+              Left err ->
+                return $ Error.errorResponseFor err
 
-              headers =
-                Types.addHeadersIfNotIncluded
-                  (catMaybes
-                    [ Just $ Types.toHeader contentType
-                    , Just contentRange, profileH apiRequest
-                    ]
-                  )
-                  (Types.unwrapGucHeader <$> ghdrs)
+              Right (ghdrs, gstatus) ->
+                let
+                  (rangeStatus, contentRange) =
+                    RangeQuery.rangeStatusHeader
+                      (ApiRequest.iTopLevelRange apiRequest)
+                      queryTotal
+                      tableTotal
 
-              rBody =
-                if invMethod == ApiRequest.InvHead then mempty else toS body
-            in
-            if contentType == Types.CTSingularJSON && queryTotal /= 1
-              then do
-                Hasql.condemn
-                return . Error.errorResponseFor . Error.singularityError $ queryTotal
-              else
-                return $ Wai.responseLBS status headers rBody
+                  status =
+                    fromMaybe rangeStatus gstatus
+
+                  headers =
+                    Types.addHeadersIfNotIncluded
+                      (catMaybes
+                        [ Just $ Types.toHeader contentType
+                        , Just contentRange, profileH apiRequest
+                        ]
+                      )
+                      (Types.unwrapGucHeader <$> ghdrs)
+
+                  rBody =
+                    if invMethod == ApiRequest.InvHead then mempty else toS body
+                in
+                if contentType == Types.CTSingularJSON && queryTotal /= 1
+                  then do
+                    Hasql.condemn
+                    return . Error.errorResponseFor . Error.singularityError $ queryTotal
+                  else
+                    return $ Wai.responseLBS status headers rBody
 
 
 handleOpenApi
@@ -881,36 +908,6 @@ returnsSingle apiRequest =
       Types.procReturnsSingle proc
     _ ->
       False
-
-
-readSqlParts
-  :: AppConfig
-  -> DbStructure
-  -> ApiRequest
-  -> ContentType
-  -> Types.QualifiedIdentifier
-  -> Either
-       Wai.Response
-       (Hasql.Snippet, Hasql.Snippet, Maybe Types.FieldName, [Types.FieldName])
-readSqlParts conf dbStructure apiRequest contentType identifier=
-  let
-    readReq =
-      DbRequestBuilder.readRequest
-        (Types.qiSchema identifier)
-        (Types.qiName identifier)
-        (Config.configDbMaxRows conf)
-        (Types.dbRelations dbStructure)
-        apiRequest
-
-    returnings :: Types.ReadRequest -> Either Wai.Response [Types.FieldName]
-    returnings rr =
-      Right (DbRequestBuilder.returningCols rr [])
-  in
-  (,,,) <$>
-    (QueryBuilder.readRequestToQuery <$> readReq) <*>
-    (QueryBuilder.readRequestToCountQuery <$> readReq) <*>
-    (binaryField contentType (rawContentTypes conf) (returnsScalar apiRequest) =<< readReq) <*>
-    (returnings =<< readReq)
 
 
 mutateSqlParts
