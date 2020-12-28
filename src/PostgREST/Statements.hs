@@ -14,6 +14,7 @@ module PostgREST.Statements (
   , createReadStatement
   , callProcStatement
   , createExplainStatement
+  , ProcResults
 ) where
 
 
