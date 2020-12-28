@@ -105,17 +105,39 @@ postgrestResponse dbStructure conf pool time req body =
   in
   case apiReq of
     Left err ->
-      return . Error.errorResponseFor $ err
+      return $ Error.errorResponseFor err
 
     Right apiRequest ->
       do
         -- The jwt must be checked before touching the db.
-        claims <- jwtClaims conf apiRequest time
-        case claims of
+        clms <- jwtClaims conf apiRequest time
+
+        case clms of
           Left err ->
-            return . Error.errorResponseFor $ err
-          Right clms ->
-            postgrestResponseWithClaims conf pool dbStructure apiRequest clms
+            return $ Error.errorResponseFor err
+
+          Right claims ->
+            case responseContentType conf apiRequest of
+              Left err ->
+                return $ Error.errorResponseFor err
+
+              Right contentType ->
+                do
+                  dbResp <-
+                    Hasql.use pool $
+                      Hasql.transaction Hasql.ReadCommitted (txMode apiRequest) $
+                        optionalRollback conf apiRequest $
+                          Middleware.runPgLocals
+                            conf
+                            claims
+                            (handleRequest dbStructure conf contentType)
+                            apiRequest
+
+                  return $
+                    either
+                      (Error.errorResponseFor . Error.PgError (Auth.containsRole claims))
+                      identity
+                      dbResp
 
 
 jwtClaims
@@ -131,35 +153,6 @@ jwtClaims conf apiRequest time =
       (toS $ ApiRequest.iJWT apiRequest)
       time
       (rightToMaybe $ Config.configJwtRoleClaimKey conf)
-
-
-postgrestResponseWithClaims
-  :: AppConfig
-  -> Hasql.Pool
-  -> DbStructure
-  -> ApiRequest
-  -> JWTClaims
-  -> IO Wai.Response
-postgrestResponseWithClaims conf pool dbStructure apiRequest claims =
-  let
-    transaction =
-      optionalRollback conf apiRequest $
-        Middleware.runPgLocals
-          conf
-          claims
-          (app dbStructure conf)
-          apiRequest
-  in
-  do
-    dbResp <-
-      Hasql.use pool $
-        Hasql.transaction Hasql.ReadCommitted (txMode apiRequest) transaction
-
-    return $
-      either
-        (Error.errorResponseFor . Error.PgError (Auth.containsRole claims))
-        identity
-        dbResp
 
 
 txMode :: ApiRequest -> Hasql.Mode
@@ -182,27 +175,14 @@ txMode apiRequest =
     _ ->
       Hasql.Write
 
-app
-  :: DbStructure
-  -> AppConfig
-  -> ApiRequest
-  -> Hasql.Transaction Wai.Response
-app dbStructure conf apiRequest =
-  case responseContentType conf apiRequest of
-    Left err ->
-      return $ Error.errorResponseFor err
-
-    Right contentType ->
-      handleRequest dbStructure conf apiRequest contentType
-
 
 handleRequest
   :: DbStructure
   -> AppConfig
-  -> ApiRequest
   -> ContentType
+  -> ApiRequest
   -> Hasql.Transaction Wai.Response
-handleRequest dbStructure conf apiRequest contentType =
+handleRequest dbStructure conf contentType apiRequest =
   case (ApiRequest.iAction apiRequest, ApiRequest.iTarget apiRequest) of
     (ApiRequest.ActionRead headersOnly, ApiRequest.TargetIdent identifier) ->
       handleRead conf dbStructure apiRequest headersOnly contentType identifier
@@ -241,16 +221,7 @@ handleRead
   -> Types.QualifiedIdentifier
   -> Hasql.Transaction Wai.Response
 handleRead conf dbStructure apiRequest headersOnly contentType identifier =
-  let
-    readReq =
-      DbRequestBuilder.readRequest
-        (Types.qiSchema identifier)
-        (Types.qiName identifier)
-        (Config.configDbMaxRows conf)
-        (Types.dbRelations dbStructure)
-        apiRequest
-  in
-  case readReq of
+  case readRequest conf dbStructure identifier apiRequest of
     Left errorResponse -> return errorResponse
     Right req ->
       let
@@ -324,6 +295,7 @@ handleRead conf dbStructure apiRequest headersOnly contentType identifier =
 
                   rBody =
                     if headersOnly then mempty else toS body
+
                 return $
                   if contentType == Types.CTSingularJSON && queryTotal /= 1 then
                     Error.errorResponseFor . Error.singularityError $ queryTotal
@@ -702,17 +674,8 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
 
     identifier =
       Types.QualifiedIdentifier pdSchema tName
-
-    readReq =
-      DbRequestBuilder.readRequest
-        (Types.qiSchema identifier)
-        (Types.qiName identifier)
-        (Config.configDbMaxRows conf)
-        (Types.dbRelations dbStructure)
-        apiRequest
-
   in
-  case readReq of
+  case readRequest conf dbStructure identifier apiRequest of
     Left errorResponse -> return errorResponse
     Right req ->
       let
@@ -825,10 +788,10 @@ handleOpenApi conf dbStructure apiRequest headersOnly tSchema =
   in
   do
     body <-
-      encodeApi <$>
-        Hasql.statement tSchema DbStructure.accessibleTables <*>
-        Hasql.statement tSchema DbStructure.schemaDescription <*>
-        Hasql.statement tSchema DbStructure.accessibleProcs
+      encodeApi
+        <$> Hasql.statement tSchema DbStructure.accessibleTables
+        <*> Hasql.statement tSchema DbStructure.schemaDescription
+        <*> Hasql.statement tSchema DbStructure.accessibleProcs
 
     return $
       Wai.responseLBS
@@ -917,27 +880,52 @@ mutateSqlParts
   -> Types.QualifiedIdentifier
   -> Either Wai.Response (Hasql.Snippet, Hasql.Snippet)
 mutateSqlParts conf dbStructure apiRequest identifier =
-  let
-    readReq =
-      DbRequestBuilder.readRequest
-        (Types.qiSchema identifier)
-        (Types.qiName identifier)
-        (Config.configDbMaxRows conf)
-        (Types.dbRelations dbStructure)
-        apiRequest
-
-    mutReq =
-      DbRequestBuilder.mutateRequest
-        (Types.qiSchema identifier)
-        (Types.qiName identifier)
-        apiRequest
-        (Types.tablePKCols dbStructure (Types.qiSchema identifier) (Types.qiName identifier))
-        =<< readReq
-  in
   (,) <$>
-    (QueryBuilder.readRequestToQuery <$> readReq) <*>
-    (QueryBuilder.mutateRequestToQuery <$> mutReq)
+    (readQuery conf dbStructure identifier apiRequest) <*>
+    (mutateQuery conf dbStructure identifier apiRequest)
 
+
+readQuery
+  :: AppConfig
+  -> DbStructure
+  -> Types.QualifiedIdentifier
+  -> ApiRequest
+  -> Either Wai.Response Hasql.Snippet
+readQuery conf dbStructure identifier apiRequest =
+  QueryBuilder.readRequestToQuery <$>
+    readRequest conf dbStructure identifier apiRequest
+
+
+readRequest
+  :: AppConfig
+  -> DbStructure
+  -> Types.QualifiedIdentifier
+  -> ApiRequest
+  -> Either Wai.Response Types.ReadRequest
+readRequest conf dbStructure identifier apiRequest =
+  DbRequestBuilder.readRequest
+    (Types.qiSchema identifier)
+    (Types.qiName identifier)
+    (Config.configDbMaxRows conf)
+    (Types.dbRelations dbStructure)
+    apiRequest
+
+
+mutateQuery
+  :: AppConfig
+  -> DbStructure
+  -> Types.QualifiedIdentifier
+  -> ApiRequest
+  -> Either Wai.Response Hasql.Snippet
+mutateQuery conf dbStructure identifier apiRequest =
+  QueryBuilder.mutateRequestToQuery <$>
+    (DbRequestBuilder.mutateRequest
+      (Types.qiSchema identifier)
+      (Types.qiName identifier)
+      apiRequest
+      (Types.tablePKCols dbStructure (Types.qiSchema identifier) (Types.qiName identifier))
+      =<< readRequest conf dbStructure identifier apiRequest
+    )
 
 
 -- CONTENT TYPES
