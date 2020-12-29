@@ -83,8 +83,7 @@ postgrest logLev refConf refDbStructure pool getTime connWorker =
             <$> readIORef refDbStructure
 
         let
-          a :: _
-          a = apiReq conf req body <$> eitherDbStructure
+          _ = apiReq conf req body <$> eitherDbStructure
 
         case eitherDbStructure of
           Left err ->
