@@ -63,31 +63,34 @@ postgrest
   -> IO ()
   -> Wai.Application
 postgrest logLev refConf refDbStructure pool getTime connWorker =
-  Middleware.pgrstMiddleware logLev $ \req respond -> do
-    time <- getTime
-    body <- Wai.strictRequestBody req
-    maybeDbStructure <- readIORef refDbStructure
-    conf <- readIORef refConf
+  Middleware.pgrstMiddleware logLev $
+    \req respond ->
+      do
+        time <- getTime
+        conf <- readIORef refConf
+        body <- Wai.strictRequestBody req
+        maybeDbStructure <-
+          maybeToRight
+            (Error.errorResponseFor Error.ConnectionLostError)
+            <$> readIORef refDbStructure
 
-    case maybeDbStructure of
-      Nothing ->
-        respond . Error.errorResponseFor $ Error.ConnectionLostError
+        case maybeDbStructure of
+          Left err ->
+            respond err
 
-      Just dbStructure ->
-        do
-          response <-
-            postgrestResponse dbStructure conf pool time req body
+          Right dbStructure ->
+            do
+              response <-
+                (either identity identity <$>
+                  postgrestResponse dbStructure conf pool time req body
+                )
 
-          let
-            resp = either identity identity response
+              -- Launch the connWorker when the connection is down.
+              -- The postgrest function can respond successfully (with a stale schema
+              -- cache) before the connWorker is done.
+              when (Wai.responseStatus response == HTTP.status503) connWorker
 
-          -- Launch the connWorker when the connection is down.
-          -- The postgrest function can respond successfully (with a stale schema
-          -- cache) before the connWorker is done.
-          when (Wai.responseStatus resp == HTTP.status503) connWorker
-
-          respond resp
-
+              respond response
 
 postgrestResponse
   :: DbStructure
