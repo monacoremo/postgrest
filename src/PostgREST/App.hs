@@ -1,18 +1,19 @@
-{-|
-Module      : PostgREST.App
-Description : PostgREST main application
-
-This module is in charge of mapping HTTP requests to PostgreSQL queries.
-Some of its functionality includes:
-
-- Mapping HTTP request methods to proper SQL statements. For example, a GET request is translated to executing a SELECT query in a read-only TRANSACTION.
-- Producing HTTP Headers according to RFCs.
-- Content Negotiation
--}
+-- | Module : PostgREST.App
+--   Description : PostgREST main application
+--
+--   This module is in charge of mapping HTTP requests to PostgreSQL queries.
+--
+--   Some of its functionality includes:
+--
+--   - Mapping HTTP request methods to proper SQL statements. For example, a GET
+--     request is translated to executing a SELECT query in a read-only TRANSACTION.
+--   - Producing HTTP Headers according to RFCs.
+--   - Content Negotiation
 module PostgREST.App (postgrest) where
 
 import Data.IORef (IORef, readIORef)
 import Data.Time.Clock (UTCTime)
+import Data.Either.Combinators (mapLeft)
 
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Char8 as Char8ByteString
@@ -77,12 +78,15 @@ postgrest logLev refConf refDbStructure pool getTime connWorker =
           response <-
             postgrestResponse dbStructure conf pool time req body
 
+          let
+            resp = either identity identity response
+
           -- Launch the connWorker when the connection is down.
           -- The postgrest function can respond successfully (with a stale schema
           -- cache) before the connWorker is done.
-          when (Wai.responseStatus response == HTTP.status503) connWorker
+          when (Wai.responseStatus resp == HTTP.status503) connWorker
 
-          respond response
+          respond resp
 
 
 postgrestResponse
@@ -92,7 +96,7 @@ postgrestResponse
   -> UTCTime
   -> Wai.Request
   -> LazyByteString.ByteString
-  -> IO Wai.Response
+  -> IO (Either Wai.Response Wai.Response)
 postgrestResponse dbStructure conf pool time req body =
   let
     apiReq =
@@ -105,39 +109,58 @@ postgrestResponse dbStructure conf pool time req body =
   in
   case apiReq of
     Left err ->
-      return $ Error.errorResponseFor err
+      return . Left $ Error.errorResponseFor err
 
     Right apiRequest ->
       do
         -- The jwt must be checked before touching the db.
-        clms <- jwtClaims conf apiRequest time
+        clms <- mapLeft Error.errorResponseFor <$> jwtClaims conf apiRequest time
 
         case clms of
           Left err ->
-            return $ Error.errorResponseFor err
+            return . Left $ err
 
           Right claims ->
-            case responseContentType conf apiRequest of
+            case getContentType conf apiRequest of
               Left err ->
-                return $ Error.errorResponseFor err
+                return . Left $ err
 
               Right contentType ->
-                do
-                  dbResp <-
-                    Hasql.use pool $
-                      Hasql.transaction Hasql.ReadCommitted (txMode apiRequest) $
-                        optionalRollback conf apiRequest $
-                          Middleware.runPgLocals
-                            conf
-                            claims
-                            (handleRequest dbStructure conf contentType)
-                            apiRequest
+                abcde conf pool dbStructure apiRequest claims contentType
 
-                  return $
-                    either
-                      (Error.errorResponseFor . Error.PgError (Auth.containsRole claims))
-                      identity
-                      dbResp
+
+getContentType :: AppConfig -> ApiRequest -> Either Wai.Response ContentType
+getContentType conf apiRequest =
+  mapLeft Error.errorResponseFor $ responseContentType conf apiRequest
+
+
+abcde
+  :: AppConfig
+  -> Hasql.Pool
+  -> DbStructure
+  -> ApiRequest
+  -> JWTClaims
+  -> ContentType
+  -> IO (Either Wai.Response Wai.Response)
+abcde conf pool dbStructure apiRequest claims contentType =
+  do
+    dbResp <-
+      Hasql.use pool $
+        Hasql.transaction Hasql.ReadCommitted (txMode apiRequest) $
+          optionalRollback conf apiRequest $
+            Middleware.runPgLocals
+              conf
+              claims
+              (handleRequest dbStructure conf contentType)
+              apiRequest
+
+    case dbResp of
+      Left err ->
+        return . Left . Error.errorResponseFor $
+          Error.PgError (Auth.containsRole claims) err
+
+      Right resp ->
+        return $ Right resp
 
 
 jwtClaims
