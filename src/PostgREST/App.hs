@@ -17,7 +17,6 @@ import Data.Either.Combinators (mapLeft)
 
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Char8 as Char8ByteString
-import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.List as List (union)
 import qualified Data.Set as Set
@@ -65,71 +64,67 @@ postgrest
 postgrest logLev refConf refDbStructure pool getTime connWorker =
   Middleware.pgrstMiddleware logLev $
     \req respond ->
+      let
+        apiReq conf' req' body' dbStructure' =
+          ApiRequest.userApiRequest
+            (Config.configDbSchemas conf')
+            (Config.configDbRootSpec conf')
+            dbStructure'
+            req'
+            body'
+      in
       do
         time <- getTime
         conf <- readIORef refConf
         body <- Wai.strictRequestBody req
-        maybeDbStructure <-
+        eitherDbStructure <-
           maybeToRight
             (Error.errorResponseFor Error.ConnectionLostError)
             <$> readIORef refDbStructure
 
-        case maybeDbStructure of
+        let
+          a :: _
+          a = apiReq conf req body <$> eitherDbStructure
+
+        case eitherDbStructure of
           Left err ->
             respond err
 
           Right dbStructure ->
-            do
-              response <-
-                (either identity identity <$>
-                  postgrestResponse dbStructure conf pool time req body
-                )
-
-              -- Launch the connWorker when the connection is down.
-              -- The postgrest function can respond successfully (with a stale schema
-              -- cache) before the connWorker is done.
-              when (Wai.responseStatus response == HTTP.status503) connWorker
-
-              respond response
-
-postgrestResponse
-  :: DbStructure
-  -> AppConfig
-  -> Hasql.Pool
-  -> UTCTime
-  -> Wai.Request
-  -> LazyByteString.ByteString
-  -> IO (Either Wai.Response Wai.Response)
-postgrestResponse dbStructure conf pool time req body =
-  let
-    apiReq =
-      ApiRequest.userApiRequest
-        (Config.configDbSchemas conf)
-        (Config.configDbRootSpec conf)
-        dbStructure
-        req
-        body
-  in
-  case apiReq of
-    Left err ->
-      return . Left $ Error.errorResponseFor err
-
-    Right apiRequest ->
-      do
-        -- The jwt must be checked before touching the db.
-        clms <- mapLeft Error.errorResponseFor <$> jwtClaims conf apiRequest time
-
-        case clms of
-          Left err ->
-            return . Left $ err
-
-          Right claims ->
-            case getContentType conf apiRequest of
+            case apiReq conf req body dbStructure of
               Left err ->
-                return . Left $ err
+                respond $ Error.errorResponseFor err
 
-              Right contentType ->
-                abcde conf pool dbStructure apiRequest claims contentType
+              Right apiRequest ->
+                do
+                  -- The jwt must be checked before touching the db.
+                  clms <-
+                    mapLeft Error.errorResponseFor
+                      <$> jwtClaims conf apiRequest time
+
+                  case clms of
+                    Left err ->
+                      respond err
+
+                    Right claims ->
+                      case getContentType conf apiRequest of
+                        Left err ->
+                          respond $ err
+
+                        Right contentType ->
+                          do
+                            response <-
+                              (either identity identity <$>
+                                postgrestResponse conf pool dbStructure apiRequest claims contentType
+                              )
+
+                            -- Launch the connWorker when the connection is down.
+                            -- The postgrest function can respond successfully (with a stale schema
+                            -- cache) before the connWorker is done.
+                            when (Wai.responseStatus response == HTTP.status503) connWorker
+
+                            respond response
+
 
 
 getContentType :: AppConfig -> ApiRequest -> Either Wai.Response ContentType
@@ -137,7 +132,7 @@ getContentType conf apiRequest =
   mapLeft Error.errorResponseFor $ responseContentType conf apiRequest
 
 
-abcde
+postgrestResponse
   :: AppConfig
   -> Hasql.Pool
   -> DbStructure
@@ -145,7 +140,7 @@ abcde
   -> JWTClaims
   -> ContentType
   -> IO (Either Wai.Response Wai.Response)
-abcde conf pool dbStructure apiRequest claims contentType =
+postgrestResponse conf pool dbStructure apiRequest claims contentType =
   do
     dbResp <-
       Hasql.use pool $
@@ -186,18 +181,25 @@ txMode apiRequest =
   case (ApiRequest.iAction apiRequest, ApiRequest.iTarget apiRequest) of
     (ApiRequest.ActionRead _, _) ->
       Hasql.Read
+
     (ApiRequest.ActionInfo, _) ->
       Hasql.Read
+
     (ApiRequest.ActionInspect _, _) ->
       Hasql.Read
+
     (ApiRequest.ActionInvoke ApiRequest.InvGet, _) ->
       Hasql.Read
+
     (ApiRequest.ActionInvoke ApiRequest.InvHead, _) ->
       Hasql.Read
+
     (ApiRequest.ActionInvoke ApiRequest.InvPost, ApiRequest.TargetProc Types.ProcDescription{Types.pdVolatility=Types.Stable} _) ->
       Hasql.Read
+
     (ApiRequest.ActionInvoke ApiRequest.InvPost, ApiRequest.TargetProc Types.ProcDescription{Types.pdVolatility=Types.Immutable} _) ->
       Hasql.Read
+
     _ ->
       Hasql.Write
 
