@@ -14,6 +14,7 @@ module PostgREST.App (postgrest) where
 import Data.IORef (IORef, readIORef)
 import Data.Time.Clock (UTCTime)
 import Data.Either.Combinators (mapLeft)
+import Control.Monad.Except
 
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Char8 as Char8ByteString
@@ -232,7 +233,9 @@ handleRequest dbStructure conf contentType apiRequest =
 
     (ApiRequest.ActionInvoke invMethod, ApiRequest.TargetProc proc _) ->
       either identity identity <$>
-        handleInvoke conf dbStructure invMethod contentType apiRequest proc
+        (runExceptT $
+          handleInvoke conf dbStructure invMethod contentType apiRequest proc
+        )
 
     (ApiRequest.ActionInspect headersOnly, ApiRequest.TargetDefaultSpec tSchema) ->
       handleOpenApi conf dbStructure apiRequest headersOnly tSchema
@@ -680,6 +683,10 @@ findTable dbStructure identifier =
     (Types.dbTables dbStructure)
 
 
+type HandlerMonad =
+  ExceptT Wai.Response Hasql.Transaction
+
+
 handleInvoke
   :: AppConfig
   -> DbStructure
@@ -687,7 +694,7 @@ handleInvoke
   -> ContentType
   -> ApiRequest
   -> Types.ProcDescription
-  -> Hasql.Transaction (Either Wai.Response Wai.Response)
+  -> HandlerMonad Wai.Response
 handleInvoke conf dbStructure invMethod contentType apiRequest proc =
   let
     identifier =
@@ -695,55 +702,48 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
         (Types.pdSchema proc)
         (fromMaybe (Types.pdName proc) $ Types.procTableName proc)
   in
-  case readRequest conf dbStructure identifier apiRequest of
-    Left errorResponse ->
-      return $ Left errorResponse
+  do
+    req <-
+      liftEither $ readRequest conf dbStructure identifier apiRequest
 
-    Right req ->
-      let
-        field =
-          binaryField
-            contentType
-            (rawContentTypes conf)
-            (returnsScalar apiRequest)
-            req
-      in
-      case field of
-        Left err ->
-          return $ Left err
+    bField <-
+      liftEither $
+        binaryField
+          contentType
+          (rawContentTypes conf)
+          (returnsScalar apiRequest)
+          req
 
-        Right bField ->
-          do
-            (tableTotal, queryTotal, body, gucHeaders, gucStatus) <-
-              handleInvokeTransaction conf dbStructure apiRequest req proc contentType bField
+    (tableTotal, queryTotal, body, gucHeaders, gucStatus) <-
+      lift $ handleInvokeTransaction conf dbStructure apiRequest req proc contentType bField
 
-            case (,) <$> gucHeaders <*> gucStatus of
-              Left err ->
-                return . Left $ Error.errorResponseFor err
+    ghdrs <- liftEither $ mapLeft Error.errorResponseFor gucHeaders
+    gstatus <- liftEither $ mapLeft Error.errorResponseFor gucStatus
 
-              Right (ghdrs, gstatus) ->
-                let
-                  (rangeStatus, contentRange) =
-                    RangeQuery.rangeStatusHeader
-                      (ApiRequest.iTopLevelRange apiRequest)
-                      queryTotal
-                      tableTotal
+    let
+      (rangeStatus, contentRange) =
+        RangeQuery.rangeStatusHeader
+          (ApiRequest.iTopLevelRange apiRequest)
+          queryTotal
+          tableTotal
 
-                  headers =
-                    Types.addHeadersIfNotIncluded
-                      (catMaybes
-                        [ Just $ Types.toHeader contentType
-                        , Just contentRange
-                        , profileH apiRequest
-                        ]
-                      )
-                      (Types.unwrapGucHeader <$> ghdrs)
-                in
-                failNotSingular contentType queryTotal $
-                  Wai.responseLBS
-                    (fromMaybe rangeStatus gstatus)
-                    headers
-                    (if invMethod == ApiRequest.InvHead then mempty else toS body)
+      headers =
+        Types.addHeadersIfNotIncluded
+          (catMaybes
+            [ Just $ Types.toHeader contentType
+            , Just contentRange
+            , profileH apiRequest
+            ]
+          )
+          (Types.unwrapGucHeader <$> ghdrs)
+
+      response =
+        Wai.responseLBS
+          (fromMaybe rangeStatus gstatus)
+          headers
+          (if invMethod == ApiRequest.InvHead then mempty else toS body)
+
+    ExceptT $ failNotSingular contentType queryTotal response
 
 
 handleInvokeTransaction
