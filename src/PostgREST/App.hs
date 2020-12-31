@@ -50,8 +50,20 @@ import Protolude hiding (toS)
 import Protolude.Conv (toS)
 
 
+
+-- TYPES
+
+
 type JWTClaims =
   HashMap.HashMap Text Aeson.Value
+
+
+type DbHandler =
+  ExceptT Wai.Response Hasql.Transaction
+
+
+
+-- APP
 
 
 postgrest
@@ -65,65 +77,77 @@ postgrest
 postgrest logLev refConf refDbStructure pool getTime connWorker =
   Middleware.pgrstMiddleware logLev $
     \req respond ->
-      let
-        apiReq conf' req' body' dbStructure' =
-          ApiRequest.userApiRequest
-            (Config.configDbSchemas conf')
-            (Config.configDbRootSpec conf')
-            dbStructure'
-            req'
-            body'
-      in
-      do
-        time <- getTime
-        conf <- readIORef refConf
-        body <- Wai.strictRequestBody req
-        eitherDbStructure <-
-          maybeToRight
-            (Error.errorResponseFor Error.ConnectionLostError)
-            <$> readIORef refDbStructure
+      respond =<< postgrestApp refConf refDbStructure pool getTime connWorker req
 
-        let
-          _ = apiReq conf req body <$> eitherDbStructure
 
-        case eitherDbStructure of
+postgrestApp
+  :: IORef AppConfig
+  -> IORef (Maybe DbStructure)
+  -> Hasql.Pool
+  -> IO UTCTime
+  -> IO ()
+  -> Wai.Request
+  -> IO Wai.Response
+postgrestApp refConf refDbStructure pool getTime connWorker req =
+  let
+    apiReq conf' req' body' dbStructure' =
+      ApiRequest.userApiRequest
+        (Config.configDbSchemas conf')
+        (Config.configDbRootSpec conf')
+        dbStructure'
+        req'
+        body'
+  in
+  do
+    time <- getTime
+    conf <- readIORef refConf
+    body <- Wai.strictRequestBody req
+    eitherDbStructure <-
+      maybeToRight
+        (Error.errorResponseFor Error.ConnectionLostError)
+        <$> readIORef refDbStructure
+
+    let
+      _ = apiReq conf req body <$> eitherDbStructure
+
+    case eitherDbStructure of
+      Left err ->
+        return err
+
+      Right dbStructure ->
+        case apiReq conf req body dbStructure of
           Left err ->
-            respond err
+            return $ Error.errorResponseFor err
 
-          Right dbStructure ->
-            case apiReq conf req body dbStructure of
-              Left err ->
-                respond $ Error.errorResponseFor err
+          Right apiRequest ->
+            do
+              -- The jwt must be checked before touching the db.
+              clms <-
+                mapLeft Error.errorResponseFor
+                  <$> jwtClaims conf apiRequest time
 
-              Right apiRequest ->
-                do
-                  -- The jwt must be checked before touching the db.
-                  clms <-
-                    mapLeft Error.errorResponseFor
-                      <$> jwtClaims conf apiRequest time
+              case clms of
+                Left err ->
+                  return err
 
-                  case clms of
+                Right claims ->
+                  case getContentType conf apiRequest of
                     Left err ->
-                      respond err
+                      return $ err
 
-                    Right claims ->
-                      case getContentType conf apiRequest of
-                        Left err ->
-                          respond $ err
+                    Right contentType ->
+                      do
+                        response <-
+                          (either identity identity <$>
+                            postgrestResponse conf pool dbStructure apiRequest claims contentType
+                          )
 
-                        Right contentType ->
-                          do
-                            response <-
-                              (either identity identity <$>
-                                postgrestResponse conf pool dbStructure apiRequest claims contentType
-                              )
+                        -- Launch the connWorker when the connection is down.
+                        -- The postgrest function can respond successfully (with a stale schema
+                        -- cache) before the connWorker is done.
+                        when (Wai.responseStatus response == HTTP.status503) connWorker
 
-                            -- Launch the connWorker when the connection is down.
-                            -- The postgrest function can respond successfully (with a stale schema
-                            -- cache) before the connWorker is done.
-                            when (Wai.responseStatus response == HTTP.status503) connWorker
-
-                            respond response
+                        return response
 
 
 
@@ -683,10 +707,6 @@ findTable dbStructure identifier =
     (Types.dbTables dbStructure)
 
 
-type HandlerMonad =
-  ExceptT Wai.Response Hasql.Transaction
-
-
 handleInvoke
   :: AppConfig
   -> DbStructure
@@ -694,7 +714,7 @@ handleInvoke
   -> ContentType
   -> ApiRequest
   -> Types.ProcDescription
-  -> HandlerMonad Wai.Response
+  -> DbHandler Wai.Response
 handleInvoke conf dbStructure invMethod contentType apiRequest proc =
   let
     identifier =
@@ -716,7 +736,27 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
 
     (tableTotal, queryTotal, body, gucHeaders, gucStatus) <-
       lift $
-        handleInvokeTransaction conf dbStructure apiRequest req proc contentType bField
+        Hasql.statement mempty $
+          Statements.callProcStatement
+            (returnsScalar apiRequest)
+            (returnsSingle apiRequest)
+            (QueryBuilder.requestToCallProcQuery
+              (Types.QualifiedIdentifier (Types.pdSchema proc) (Types.pdName proc))
+              (Types.specifiedProcArgs (ApiRequest.iColumns apiRequest) proc)
+              (ApiRequest.iPayload apiRequest)
+              (returnsScalar apiRequest)
+              (ApiRequest.iPreferParameters apiRequest)
+              (DbRequestBuilder.returningCols req [])
+            )
+            (QueryBuilder.readRequestToQuery req)
+            (QueryBuilder.readRequestToCountQuery req)
+            (shouldCount apiRequest)
+            (contentType == Types.CTSingularJSON)
+            (contentType == Types.CTTextCSV)
+            (ApiRequest.iPreferParameters apiRequest == Just Types.MultipleObjects)
+            bField
+            (Types.pgVersion dbStructure)
+            (Config.configDbPreparedStatements conf)
 
     ghdrs <- liftEither $ mapLeft Error.errorResponseFor gucHeaders
     gstatus <- liftEither $ mapLeft Error.errorResponseFor gucStatus
@@ -738,49 +778,12 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
           )
           (Types.unwrapGucHeader <$> ghdrs)
 
-      response =
-        Wai.responseLBS
-          (fromMaybe rangeStatus gstatus)
-          headers
-          (if invMethod == ApiRequest.InvHead then mempty else toS body)
 
-    ExceptT $ failNotSingular contentType queryTotal response
-
-
-handleInvokeTransaction
-  :: AppConfig
-  -> DbStructure
-  -> ApiRequest
-  -> Types.ReadRequest
-  -> Types.ProcDescription
-  -> ContentType
-  -> Maybe Types.FieldName
-  -> Hasql.Transaction Statements.ProcResults
-handleInvokeTransaction conf dbStructure apiRequest req proc contentType bField =
-  let
-    pq =
-      QueryBuilder.requestToCallProcQuery
-        (Types.QualifiedIdentifier (Types.pdSchema proc) (Types.pdName proc))
-        (Types.specifiedProcArgs (ApiRequest.iColumns apiRequest) proc)
-        (ApiRequest.iPayload apiRequest)
-        (returnsScalar apiRequest)
-        (ApiRequest.iPreferParameters apiRequest)
-        (DbRequestBuilder.returningCols req [])
-  in
-    Hasql.statement mempty $
-      Statements.callProcStatement
-        (returnsScalar apiRequest)
-        (returnsSingle apiRequest)
-        pq
-        (QueryBuilder.readRequestToQuery req)
-        (QueryBuilder.readRequestToCountQuery req)
-        (shouldCount apiRequest)
-        (contentType == Types.CTSingularJSON)
-        (contentType == Types.CTTextCSV)
-        (ApiRequest.iPreferParameters apiRequest == Just Types.MultipleObjects)
-        bField
-        (Types.pgVersion dbStructure)
-        (Config.configDbPreparedStatements conf)
+    ExceptT $ failNotSingular contentType queryTotal $
+      Wai.responseLBS
+        (fromMaybe rangeStatus gstatus)
+        headers
+        (if invMethod == ApiRequest.InvHead then mempty else toS body)
 
 
 -- | Fail a response if a single JSON object was requested and not exactly one
