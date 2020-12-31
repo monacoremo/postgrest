@@ -715,7 +715,8 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
           req
 
     (tableTotal, queryTotal, body, gucHeaders, gucStatus) <-
-      lift $ handleInvokeTransaction conf dbStructure apiRequest req proc contentType bField
+      lift $
+        handleInvokeTransaction conf dbStructure apiRequest req proc contentType bField
 
     ghdrs <- liftEither $ mapLeft Error.errorResponseFor gucHeaders
     gstatus <- liftEither $ mapLeft Error.errorResponseFor gucStatus
