@@ -148,7 +148,9 @@ postgrestApp refConf refDbStructure pool getTime req =
             Middleware.runPgLocals
               conf
               claims
-              (handleRequest dbStructure conf contentType)
+              (\r -> either identity identity <$>
+                (runExceptT $ handleRequest dbStructure conf contentType r)
+              )
               apiRequest
 
     liftEither $
@@ -189,56 +191,35 @@ handleRequest
   -> AppConfig
   -> ContentType
   -> ApiRequest
-  -> Hasql.Transaction Wai.Response
+  -> DbHandler Wai.Response
 handleRequest dbStructure conf contentType apiRequest =
   case (ApiRequest.iAction apiRequest, ApiRequest.iTarget apiRequest) of
     (ApiRequest.ActionRead headersOnly, ApiRequest.TargetIdent identifier) ->
-      either identity identity <$>
-        (runExceptT $
-          handleRead conf dbStructure apiRequest headersOnly contentType identifier
-        )
+      handleRead conf dbStructure apiRequest headersOnly contentType identifier
 
     (ApiRequest.ActionCreate, ApiRequest.TargetIdent identifier) ->
-      either identity identity <$>
-        (runExceptT $
-          handleCreate conf dbStructure apiRequest contentType identifier
-        )
+      handleCreate conf dbStructure apiRequest contentType identifier
 
     (ApiRequest.ActionUpdate, ApiRequest.TargetIdent identifier) ->
-      either identity identity <$>
-        (runExceptT $
-          handleUpdate conf dbStructure apiRequest contentType identifier
-        )
+      handleUpdate conf dbStructure apiRequest contentType identifier
 
     (ApiRequest.ActionSingleUpsert, ApiRequest.TargetIdent identifier) ->
-      either identity identity <$>
-        (runExceptT $
-          handleSingleUpsert conf dbStructure apiRequest contentType identifier
-        )
+      handleSingleUpsert conf dbStructure apiRequest contentType identifier
 
     (ApiRequest.ActionDelete, ApiRequest.TargetIdent identifier) ->
-      either identity identity <$>
-        (runExceptT $
-          handleDelete conf dbStructure contentType apiRequest identifier
-        )
+      handleDelete conf dbStructure contentType apiRequest identifier
 
     (ApiRequest.ActionInfo, ApiRequest.TargetIdent identifier) ->
-      return $ either identity identity $ handleInfo dbStructure identifier
+      liftEither $ handleInfo dbStructure identifier
 
     (ApiRequest.ActionInvoke invMethod, ApiRequest.TargetProc proc _) ->
-      either identity identity <$>
-        (runExceptT $
-          handleInvoke conf dbStructure invMethod contentType apiRequest proc
-        )
+      handleInvoke conf dbStructure invMethod contentType apiRequest proc
 
     (ApiRequest.ActionInspect headersOnly, ApiRequest.TargetDefaultSpec tSchema) ->
-      either identity identity <$>
-        (runExceptT $
-          handleOpenApi conf dbStructure apiRequest headersOnly tSchema
-        )
+      handleOpenApi conf dbStructure apiRequest headersOnly tSchema
 
     _ ->
-      return notFound
+      throwError notFound
 
 
 handleRead
