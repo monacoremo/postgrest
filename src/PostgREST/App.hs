@@ -370,9 +370,6 @@ handleCreate conf dbStructure apiRequest contentType identifier =
           (Types.pgVersion dbStructure)
           (Config.configDbPreparedStatements conf)
 
-    ghdrs <- liftEither $ mapLeft Error.errorResponseFor gucHeaders
-    gstatus <- liftEither $ mapLeft Error.errorResponseFor gucStatus
-
     let
       (ctHeaders, rBody) =
         if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
@@ -381,9 +378,8 @@ handleCreate conf dbStructure apiRequest contentType identifier =
           ([], mempty)
 
       headers =
-        Types.addHeadersIfNotIncluded
-          (catMaybes (
-            [ if null fields then
+        catMaybes
+          ( [ if null fields then
                 Nothing
               else
                 Just $ locationH (Types.qiName identifier) fields
@@ -397,15 +393,15 @@ handleCreate conf dbStructure apiRequest contentType identifier =
               else
                 (\x -> ("Preference-Applied", Char8ByteString.pack (show x))) <$>
                   ApiRequest.iPreferResolution apiRequest
-            ] ++ ctHeaders)
+            ]
+            ++ ctHeaders
           )
-          (Types.unwrapGucHeader <$> ghdrs)
 
-    failNotSingular contentType queryTotal $
-      Wai.responseLBS
-        (fromMaybe HTTP.status201 gstatus)
-        headers
-        rBody
+    response <-
+      liftEither $ mapLeft Error.errorResponseFor $
+        gucResponse HTTP.status201 headers rBody <$> gucHeaders <*> gucStatus
+
+    failNotSingular contentType queryTotal response
 
 
 handleUpdate
@@ -433,9 +429,6 @@ handleUpdate conf dbStructure apiRequest contentType identifier =
           (Types.pgVersion dbStructure)
           (Config.configDbPreparedStatements conf)
 
-    ghdrs <- liftEither $ mapLeft Error.errorResponseFor gucHeaders
-    gstatus <- liftEither $ mapLeft Error.errorResponseFor gucStatus
-
     let
       updateIsNoOp =
         Set.null (ApiRequest.iColumns apiRequest)
@@ -461,12 +454,13 @@ handleUpdate conf dbStructure apiRequest contentType identifier =
           ([], mempty)
 
       headers =
-        Types.addHeadersIfNotIncluded
-          (catMaybes ctHeaders ++ [contentRangeHeader])
-          (Types.unwrapGucHeader <$> ghdrs)
+        catMaybes ctHeaders ++ [contentRangeHeader]
 
-    failNotSingular contentType queryTotal $
-      Wai.responseLBS (fromMaybe defStatus gstatus) headers rBody
+    response <-
+      liftEither $ mapLeft Error.errorResponseFor $
+        gucResponse defStatus headers rBody <$> gucHeaders <*> gucStatus
+
+    failNotSingular contentType queryTotal response
 
 
 handleSingleUpsert
