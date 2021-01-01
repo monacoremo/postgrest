@@ -118,7 +118,7 @@ postgrestApp conf maybeDbStructure pool time req =
 
       -- The jwt must be checked before touching the db.
       rawClaims <-
-        liftIO $ Auth.jwtClaims <$>
+        lift $ Auth.jwtClaims <$>
             Auth.attemptJwtClaims
               (Config.configJWKS conf)
               (Config.configJwtAudience conf)
