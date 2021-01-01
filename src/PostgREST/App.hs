@@ -291,7 +291,7 @@ handleRead conf dbStructure apiRequest headersOnly contentType identifier =
           )
           (Types.unwrapGucHeader <$> ghdrs)
 
-    ExceptT $ failNotSingular contentType queryTotal $
+    failNotSingular contentType queryTotal $
       Wai.responseLBS
         (fromMaybe rangeStatus gstatus)
         headers
@@ -389,7 +389,7 @@ handleCreate conf dbStructure apiRequest contentType identifier =
           )
           (Types.unwrapGucHeader <$> ghdrs)
 
-    ExceptT $ failNotSingular contentType queryTotal $
+    failNotSingular contentType queryTotal $
       Wai.responseLBS
         (fromMaybe HTTP.status201 gstatus)
         headers
@@ -453,7 +453,7 @@ handleUpdate conf dbStructure apiRequest contentType identifier =
           (catMaybes ctHeaders ++ [contentRangeHeader])
           (Types.unwrapGucHeader <$> ghdrs)
 
-    ExceptT $ failNotSingular contentType queryTotal $
+    failNotSingular contentType queryTotal $
       Wai.responseLBS (fromMaybe defStatus gstatus) headers rBody
 
 
@@ -562,7 +562,7 @@ handleDelete conf dbStructure contentType apiRequest identifier =
           (catMaybes ctHeaders ++ [contentRangeHeader])
           (Types.unwrapGucHeader <$> ghdrs)
 
-    ExceptT $ failNotSingular contentType queryTotal $
+    failNotSingular contentType queryTotal $
       Wai.responseLBS (fromMaybe defStatus gstatus) headers rBody
 
 
@@ -670,7 +670,7 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
           (Types.unwrapGucHeader <$> ghdrs)
 
 
-    ExceptT $ failNotSingular contentType queryTotal $
+    failNotSingular contentType queryTotal $
       Wai.responseLBS
         (fromMaybe rangeStatus gstatus)
         headers
@@ -679,18 +679,14 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
 
 -- | Fail a response if a single JSON object was requested and not exactly one
 --   was found.
-failNotSingular
-  :: ContentType
-  -> Int64
-  -> Wai.Response
-  -> Hasql.Transaction (Either Wai.Response Wai.Response)
+failNotSingular :: ContentType -> Int64 -> Wai.Response -> DbHandler Wai.Response
 failNotSingular contentType queryTotal response =
   if contentType == Types.CTSingularJSON && queryTotal /= 1 then
     do
-      Hasql.condemn
-      return . Left . Error.errorResponseFor . Error.singularityError $ queryTotal
+      lift Hasql.condemn
+      throwError $ Error.errorResponseFor . Error.singularityError $ queryTotal
   else
-    return $ Right response
+    return response
 
 
 handleOpenApi
