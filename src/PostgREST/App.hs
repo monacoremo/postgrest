@@ -232,7 +232,10 @@ handleRequest dbStructure conf contentType apiRequest =
         )
 
     (ApiRequest.ActionInspect headersOnly, ApiRequest.TargetDefaultSpec tSchema) ->
-      handleOpenApi conf dbStructure apiRequest headersOnly tSchema
+      either identity identity <$>
+        (runExceptT $
+          handleOpenApi conf dbStructure apiRequest headersOnly tSchema
+        )
 
     _ ->
       return notFound
@@ -715,7 +718,7 @@ handleOpenApi
   -> ApiRequest
   -> Bool
   -> Types.Schema
-  -> Hasql.Transaction Wai.Response
+  -> DbHandler Wai.Response
 handleOpenApi conf dbStructure apiRequest headersOnly tSchema =
   let
     encodeApi tables schemaDescription procs =
@@ -728,7 +731,7 @@ handleOpenApi conf dbStructure apiRequest headersOnly tSchema =
   in
   do
     body <-
-      encodeApi
+      lift $ encodeApi
         <$> Hasql.statement tSchema DbStructure.accessibleTables
         <*> Hasql.statement tSchema DbStructure.schemaDescription
         <*> Hasql.statement tSchema DbStructure.accessibleProcs
