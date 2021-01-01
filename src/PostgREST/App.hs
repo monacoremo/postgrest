@@ -131,7 +131,9 @@ postgrestApp conf maybeDbStructure pool time req =
 
       contentType <-
         liftEither . maybeToRight (contentTypeError apiRequest) $
-          responseContentType conf apiRequest
+          ApiRequest.mutuallyAgreeable
+            (requestContentTypes (rawContentTypes conf) apiRequest)
+            (ApiRequest.iAccepts apiRequest)
 
       dbResp <-
         lift $ Hasql.use pool $
@@ -217,7 +219,7 @@ handleRequest dbStructure conf contentType apiRequest =
       handleOpenApi conf dbStructure apiRequest headersOnly tSchema
 
     _ ->
-      throwError notFound
+      throwError $ Wai.responseLBS  HTTP.status404 mempty mempty
 
 
 handleRead
@@ -237,7 +239,7 @@ handleRead conf dbStructure apiRequest headersOnly contentType identifier =
         QueryBuilder.readRequestToCountQuery req
 
       cQuery =
-        if estimatedCount apiRequest then
+        if ApiRequest.iPreferCount apiRequest == Just Types.EstimatedCount then
           -- LIMIT maxRows + 1 so we can determine below that maxRows
           -- was surpassed
           QueryBuilder.limitedQuery cq ((+ 1) <$> Config.configDbMaxRows conf)
@@ -278,19 +280,17 @@ handleRead conf dbStructure apiRequest headersOnly contentType identifier =
         ApiRequest.iCanonicalQS apiRequest
 
       headers =
-        catMaybes
-          [ Just $ Types.toHeader contentType, Just contentRange
-          , Just $
-              ( "Content-Location"
-              , "/"
-                  <> toS (Types.qiName identifier)
-                  <> if Char8ByteString.null qString then
-                       mempty
-                     else
-                       "?" <> toS qString
-              )
-          , profileHeader apiRequest
-          ]
+        [ Types.toHeader contentType
+        , contentRange
+        , ( "Content-Location"
+          , "/"
+              <> toS (Types.qiName identifier)
+              <> if Char8ByteString.null qString then
+                   mempty
+                 else
+                   "?" <> toS qString
+          )
+        ] ++ maybeToList (profileHeader apiRequest)
 
     response <-
       liftEither . mapLeft Error.errorResponseFor $
@@ -299,20 +299,6 @@ handleRead conf dbStructure apiRequest headersOnly contentType identifier =
           <*> gucStatus
 
     failNotSingular contentType queryTotal response
-
-
-gucResponse
-  :: HTTP.Status
-  -> [HTTP.Header]
-  -> LazyByteString.ByteString
-  -> [Types.GucHeader]
-  -> Maybe HTTP.Status
-  -> Wai.Response
-gucResponse status headers body ghdrs gstatus =
-  Wai.responseLBS
-    (fromMaybe status gstatus)
-    (Types.addHeadersIfNotIncluded headers (Types.unwrapGucHeader <$> ghdrs))
-    body
 
 
 readTotal
@@ -447,16 +433,19 @@ handleUpdate conf dbStructure apiRequest contentType identifier =
           (Config.configDbPreparedStatements conf)
 
     let
+      fullRepr =
+        ApiRequest.iPreferRepresentation apiRequest == Types.Full
+
       updateIsNoOp =
         Set.null (ApiRequest.iColumns apiRequest)
 
       defStatus
-        | queryTotal == 0 && not updateIsNoOp =
-            HTTP.status404
-        | ApiRequest.iPreferRepresentation apiRequest == Types.Full =
-            HTTP.status200
-        | otherwise =
-            HTTP.status204
+        | queryTotal == 0 && not updateIsNoOp
+            = HTTP.status404
+        | fullRepr
+            = HTTP.status200
+        | otherwise
+            = HTTP.status204
 
       contentRangeHeader =
         RangeQuery.contentRangeH
@@ -464,14 +453,14 @@ handleUpdate conf dbStructure apiRequest contentType identifier =
           (queryTotal - 1)
           (if shouldCount apiRequest then Just queryTotal else Nothing)
 
-      (ctHeaders, rBody) =
-        if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
-          ([Just $ Types.toHeader contentType, profileHeader apiRequest], toS body)
-        else
-          ([], mempty)
+      ctHeaders =
+        [Types.toHeader contentType] ++ maybeToList (profileHeader apiRequest)
+
+      rBody =
+        if fullRepr then toS body else mempty
 
       headers =
-        catMaybes ctHeaders ++ [contentRangeHeader]
+        (if fullRepr then ctHeaders else []) ++ [contentRangeHeader]
 
     response <-
       liftEither $ mapLeft Error.errorResponseFor $
@@ -504,19 +493,19 @@ handleSingleUpsert conf dbStructure apiRequest contentType identifier =
           False
           (contentType == Types.CTTextCSV)
           (ApiRequest.iPreferRepresentation apiRequest)
-          []
+          mempty
           (Types.pgVersion dbStructure)
           (Config.configDbPreparedStatements conf)
 
     let
       headers =
-        catMaybes [Just $ Types.toHeader contentType, profileHeader apiRequest]
+        [Types.toHeader contentType] ++ maybeToList (profileHeader apiRequest)
 
-      (defStatus, rBody) =
+      response =
         if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
-          (HTTP.status200, toS body)
+          gucResponse HTTP.status200 headers (toS body)
         else
-          (HTTP.status204, mempty)
+          gucResponse HTTP.status204 headers mempty
 
     -- Makes sure the querystring pk matches the payload pk
     -- e.g. PUT /items?id=eq.1 { "id" : 1, .. } is accepted,
@@ -528,8 +517,8 @@ handleSingleUpsert conf dbStructure apiRequest contentType identifier =
         lift Hasql.condemn
         throwError $ Error.errorResponseFor Error.PutMatchingPkError
     else
-      liftEither $ mapLeft Error.errorResponseFor $
-        gucResponse defStatus headers rBody <$> gucHeaders <*> gucStatus
+      liftEither . mapLeft Error.errorResponseFor $
+        response <$> gucHeaders <*> gucStatus
 
 
 handleDelete
@@ -557,12 +546,6 @@ handleDelete conf dbStructure contentType apiRequest identifier =
           (Config.configDbPreparedStatements conf)
 
     let
-      fullRepr =
-        ApiRequest.iPreferRepresentation apiRequest == Types.Full
-
-      defStatus =
-        if fullRepr then HTTP.status200 else HTTP.status204
-
       contentRangeHeader =
         RangeQuery.contentRangeH 1 0 $
           if shouldCount apiRequest then Just queryTotal else Nothing
@@ -573,17 +556,17 @@ handleDelete conf dbStructure contentType apiRequest identifier =
           , profileHeader apiRequest
           ]
 
-      rBody =
-        if fullRepr then toS body else mempty
+      response =
+        if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
+          gucResponse HTTP.status200 (ctHeaders ++ [contentRangeHeader]) (toS body)
+        else
+          gucResponse HTTP.status204 [contentRangeHeader] mempty
 
-      headers =
-        (if fullRepr then ctHeaders else []) ++ [contentRangeHeader]
+    resp <-
+      liftEither . mapLeft Error.errorResponseFor $
+        response <$> gucHeaders <*> gucStatus
 
-    response <-
-      liftEither $ mapLeft Error.errorResponseFor $
-        gucResponse defStatus headers rBody <$> gucHeaders <*> gucStatus
-
-    failNotSingular contentType queryTotal response
+    failNotSingular contentType queryTotal resp
 
 
 handleInfo :: DbStructure -> Types.QualifiedIdentifier -> Either Wai.Response Wai.Response
@@ -605,7 +588,7 @@ handleInfo dbStructure identifier =
       Right $ Wai.responseLBS HTTP.status200 [allOrigins, allowH table] mempty
 
     Nothing ->
-      Left notFound
+      Left $ Wai.responseLBS HTTP.status404 mempty mempty
 
 
 handleInvoke
@@ -667,11 +650,10 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
           tableTotal
 
       headers =
-        catMaybes
-          [ Just $ Types.toHeader contentType
-          , Just contentRange
-          , profileHeader apiRequest
-          ]
+        [ Types.toHeader contentType
+        , contentRange
+        ]
+        ++ maybeToList (profileHeader apiRequest)
 
       rBody =
         if invMethod == ApiRequest.InvHead then mempty else toS body
@@ -683,6 +665,21 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
     failNotSingular contentType queryTotal response
 
 
+-- |
+gucResponse
+  :: HTTP.Status
+  -> [HTTP.Header]
+  -> LazyByteString.ByteString
+  -> [Types.GucHeader]
+  -> Maybe HTTP.Status
+  -> Wai.Response
+gucResponse status headers body ghdrs gstatus =
+  Wai.responseLBS
+    (fromMaybe status gstatus)
+    (Types.addHeadersIfNotIncluded headers (Types.unwrapGucHeader <$> ghdrs))
+    body
+
+
 -- | Fail a response if a single JSON object was requested and not exactly one
 --   was found.
 failNotSingular :: ContentType -> Int64 -> Wai.Response -> DbHandler Wai.Response
@@ -690,7 +687,7 @@ failNotSingular contentType queryTotal response =
   if contentType == Types.CTSingularJSON && queryTotal /= 1 then
     do
       lift Hasql.condemn
-      throwError $ Error.errorResponseFor . Error.singularityError $ queryTotal
+      throwError . Error.errorResponseFor . Error.singularityError $ queryTotal
   else
     return response
 
@@ -730,11 +727,8 @@ handleOpenApi conf dbStructure apiRequest headersOnly tSchema =
 openApiTableInfo :: DbStructure -> Types.Table -> (Types.Table, [Types.Column], [Text])
 openApiTableInfo dbStructure table =
   let
-    schema =
-      Types.tableSchema table
-
-    name =
-      Types.tableName table
+    schema = Types.tableSchema table
+    name = Types.tableName table
   in
     ( table
     , Types.tableCols dbStructure schema name
@@ -742,23 +736,10 @@ openApiTableInfo dbStructure table =
     )
 
 
-notFound :: Wai.Response
-notFound =
-  Wai.responseLBS HTTP.status404 mempty mempty
-
-
-estimatedCount :: ApiRequest -> Bool
-estimatedCount apiRequest =
-  ApiRequest.iPreferCount apiRequest == Just Types.EstimatedCount
-
-
 shouldCount :: ApiRequest -> Bool
 shouldCount apiRequest =
-  let
-    exactCount =
-      ApiRequest.iPreferCount apiRequest == Just Types.ExactCount
-  in
-  exactCount || estimatedCount apiRequest
+  ApiRequest.iPreferCount apiRequest == Just Types.ExactCount
+  || ApiRequest.iPreferCount apiRequest == Just Types.EstimatedCount
 
 
 returnsScalar :: ApiRequest -> Bool
@@ -831,25 +812,9 @@ rawContentTypes conf =
   [ Types.CTOctetStream, Types.CTTextPlain ]
 
 
-responseContentType :: AppConfig -> ApiRequest -> Maybe ContentType
-responseContentType conf apiRequest =
-  let
-    produces =
-      requestContentTypes
-        (rawContentTypes conf)
-        (ApiRequest.iAction apiRequest)
-        (ApiRequest.iTarget apiRequest)
-  in
-  ApiRequest.mutuallyAgreeable produces (ApiRequest.iAccepts apiRequest)
-
-
-requestContentTypes
-  :: [ContentType]
-  -> ApiRequest.Action
-  -> ApiRequest.Target
-  -> [ContentType]
-requestContentTypes contentTypes action target =
-  case action of
+requestContentTypes :: [ContentType] -> ApiRequest.ApiRequest -> [ContentType]
+requestContentTypes contentTypes apiRequest =
+  case ApiRequest.iAction apiRequest of
     ApiRequest.ActionRead _ ->
       defaultContentTypes ++ contentTypes
 
@@ -865,7 +830,7 @@ requestContentTypes contentTypes action target =
     ApiRequest.ActionInvoke _ ->
       defaultContentTypes
         ++ contentTypes
-        ++ [Types.CTOpenAPI | ApiRequest.tpIsRootSpec target]
+        ++ [Types.CTOpenAPI | ApiRequest.tpIsRootSpec (ApiRequest.iTarget apiRequest)]
 
     ApiRequest.ActionInspect _ ->
       [Types.CTOpenAPI, Types.CTApplicationJSON]
@@ -895,11 +860,8 @@ binaryField ct contentTypes isScalarProc readReq
       Right $ Just "pgrst_scalar"
   | ct `elem` contentTypes =
       let
-        fldNames =
-          Types.fstFieldNames readReq
-
-        fieldName =
-          headMay fldNames
+        fldNames = Types.fstFieldNames readReq
+        fieldName = headMay fldNames
       in
       if length fldNames == 1 && fieldName /= Just "*" then
         Right fieldName
@@ -991,5 +953,3 @@ findTable dbStructure identifier =
       tableMatches table =
         Types.tableName table == Types.qiName identifier
         && Types.tableSchema table == Types.qiSchema identifier
-
-
