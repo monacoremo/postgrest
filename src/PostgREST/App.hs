@@ -194,7 +194,9 @@ handleRequest dbStructure conf contentType apiRequest =
   case (ApiRequest.iAction apiRequest, ApiRequest.iTarget apiRequest) of
     (ApiRequest.ActionRead headersOnly, ApiRequest.TargetIdent identifier) ->
       either identity identity <$>
-        handleRead conf dbStructure apiRequest headersOnly contentType identifier
+        (runExceptT $
+          handleRead conf dbStructure apiRequest headersOnly contentType identifier
+        )
 
     (ApiRequest.ActionCreate, ApiRequest.TargetIdent identifier) ->
       handleCreate conf dbStructure apiRequest contentType identifier
@@ -231,84 +233,73 @@ handleRead
   -> Bool
   -> ContentType
   -> Types.QualifiedIdentifier
-  -> Hasql.Transaction (Either Wai.Response Wai.Response)
+  -> DbHandler Wai.Response
 handleRead conf dbStructure apiRequest headersOnly contentType identifier =
-  case readRequest conf dbStructure identifier apiRequest of
-    Left errorResponse ->
-      return $ Left errorResponse
+  do
+    req <- liftEither $ readRequest conf dbStructure identifier apiRequest
 
-    Right req ->
-      let
-        cq =
-          QueryBuilder.readRequestToCountQuery req
+    let
+      cq =
+        QueryBuilder.readRequestToCountQuery req
 
-        cQuery =
-          if estimatedCount apiRequest then
-            -- LIMIT maxRows + 1 so we can determine below that maxRows
-            -- was surpassed
-            QueryBuilder.limitedQuery cq ((+ 1) <$> Config.configDbMaxRows conf)
-          else
-            cq
+      cQuery =
+        if estimatedCount apiRequest then
+          -- LIMIT maxRows + 1 so we can determine below that maxRows
+          -- was surpassed
+          QueryBuilder.limitedQuery cq ((+ 1) <$> Config.configDbMaxRows conf)
+        else
+          cq
 
-        field =
-          binaryField
-            contentType
-            (rawContentTypes conf)
-            (returnsScalar apiRequest)
-            req
-      in
-      case field of
-        Left err ->
-          return $ Left err
+    bField <-
+      liftEither $
+        binaryField
+          contentType
+          (rawContentTypes conf)
+          (returnsScalar apiRequest)
+          req
 
-        Right bField ->
-          let
-            stm =
-              Statements.createReadStatement
-                (QueryBuilder.readRequestToQuery req)
-                cQuery
-                (contentType == Types.CTSingularJSON)
-                (shouldCount apiRequest)
-                (contentType == Types.CTTextCSV)
-                bField
-                (Types.pgVersion dbStructure)
-                (Config.configDbPreparedStatements conf)
-          in
-          do
-            (tableTotal, queryTotal, _ , body, gucHeaders, gucStatus) <-
-              Hasql.statement mempty $ stm
+    (tableTotal, queryTotal, _ , body, gucHeaders, gucStatus) <-
+      lift $ Hasql.statement mempty $
+        Statements.createReadStatement
+          (QueryBuilder.readRequestToQuery req)
+          cQuery
+          (contentType == Types.CTSingularJSON)
+          (shouldCount apiRequest)
+          (contentType == Types.CTTextCSV)
+          bField
+          (Types.pgVersion dbStructure)
+          (Config.configDbPreparedStatements conf)
 
-            case (,) <$> gucHeaders <*> gucStatus of
-              Left err ->
-                return . Left $ Error.errorResponseFor err
+    ghdrs <- liftEither $ mapLeft Error.errorResponseFor gucHeaders
+    gstatus <- liftEither $ mapLeft Error.errorResponseFor gucStatus
 
-              Right (ghdrs, gstatus) -> do
-                total <- readTotal conf tableTotal apiRequest cq
-                let
-                  (rangeStatus, contentRange) =
-                    RangeQuery.rangeStatusHeader
-                      (ApiRequest.iTopLevelRange apiRequest)
-                      queryTotal
-                      total
+    total <- lift $ readTotal conf tableTotal apiRequest cq
 
-                  headers =
-                    Types.addHeadersIfNotIncluded
-                      (catMaybes
-                        [ Just $ Types.toHeader contentType, Just contentRange
-                        , Just $
-                            contentLocationH
-                              (Types.qiName identifier)
-                              (ApiRequest.iCanonicalQS apiRequest)
-                        , profileH apiRequest
-                        ]
-                      )
-                      (Types.unwrapGucHeader <$> ghdrs)
+    let
+      (rangeStatus, contentRange) =
+        RangeQuery.rangeStatusHeader
+          (ApiRequest.iTopLevelRange apiRequest)
+          queryTotal
+          total
 
-                failNotSingular contentType queryTotal $
-                  Wai.responseLBS
-                    (fromMaybe rangeStatus gstatus)
-                    headers
-                    (if headersOnly then mempty else toS body)
+      headers =
+        Types.addHeadersIfNotIncluded
+          (catMaybes
+            [ Just $ Types.toHeader contentType, Just contentRange
+            , Just $
+                contentLocationH
+                  (Types.qiName identifier)
+                  (ApiRequest.iCanonicalQS apiRequest)
+            , profileH apiRequest
+            ]
+          )
+          (Types.unwrapGucHeader <$> ghdrs)
+
+    ExceptT $ failNotSingular contentType queryTotal $
+      Wai.responseLBS
+        (fromMaybe rangeStatus gstatus)
+        headers
+        (if headersOnly then mempty else toS body)
 
 
 readTotal
