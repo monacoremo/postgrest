@@ -16,7 +16,6 @@ import Data.Time.Clock (UTCTime)
 import Data.Either.Combinators (mapLeft)
 import Control.Monad.Except
 
-import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Char8 as Char8ByteString
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.List as List (union)
@@ -61,10 +60,6 @@ type IOHandler =
 
 type DbHandler =
   ExceptT Wai.Response Hasql.Transaction
-
-
-type JWTClaims =
-  HashMap.HashMap Text Aeson.Value
 
 
 
@@ -130,37 +125,24 @@ postgrestApp refConf refDbStructure pool getTime req =
 
     -- The jwt must be checked before touching the db.
     rawClaims <-
-      liftIO $ mapLeft Error.errorResponseFor
-        <$> jwtClaims conf apiRequest time
+      liftIO $
+        Auth.jwtClaims <$>
+          Auth.attemptJwtClaims
+            (Config.configJWKS conf)
+            (Config.configJwtAudience conf)
+            (toS $ ApiRequest.iJWT apiRequest)
+            time
+            (rightToMaybe $ Config.configJwtRoleClaimKey conf)
 
-    claims <- liftEither $ rawClaims
+    claims <-
+      liftEither $ mapLeft Error.errorResponseFor rawClaims
 
-    contentType <- liftEither $ getContentType conf apiRequest
+    contentType <-
+      liftEither $ mapLeft Error.errorResponseFor $
+        responseContentType conf apiRequest
 
-    resp <-
-      lift $ postgrestResponse conf pool dbStructure apiRequest claims contentType
-
-    liftEither resp
-
-
-
-getContentType :: AppConfig -> ApiRequest -> Either Wai.Response ContentType
-getContentType conf apiRequest =
-  mapLeft Error.errorResponseFor $ responseContentType conf apiRequest
-
-
-postgrestResponse
-  :: AppConfig
-  -> Hasql.Pool
-  -> DbStructure
-  -> ApiRequest
-  -> JWTClaims
-  -> ContentType
-  -> IO (Either Wai.Response Wai.Response)
-postgrestResponse conf pool dbStructure apiRequest claims contentType =
-  do
     dbResp <-
-      Hasql.use pool $
+      lift $ Hasql.use pool $
         Hasql.transaction Hasql.ReadCommitted (txMode apiRequest) $
           optionalRollback conf apiRequest $
             Middleware.runPgLocals
@@ -169,28 +151,9 @@ postgrestResponse conf pool dbStructure apiRequest claims contentType =
               (handleRequest dbStructure conf contentType)
               apiRequest
 
-    case dbResp of
-      Left err ->
-        return . Left . Error.errorResponseFor $
-          Error.PgError (Auth.containsRole claims) err
-
-      Right resp ->
-        return $ Right resp
-
-
-jwtClaims
-  :: AppConfig
-  -> ApiRequest
-  -> UTCTime
-  -> IO (Either Error.SimpleError JWTClaims)
-jwtClaims conf apiRequest time =
-  Auth.jwtClaims <$>
-    Auth.attemptJwtClaims
-      (Config.configJWKS conf)
-      (Config.configJwtAudience conf)
-      (toS $ ApiRequest.iJWT apiRequest)
-      time
-      (rightToMaybe $ Config.configJwtRoleClaimKey conf)
+    liftEither $
+      mapLeft (Error.errorResponseFor . Error.PgError (Auth.containsRole claims))
+      dbResp
 
 
 txMode :: ApiRequest -> Hasql.Mode
