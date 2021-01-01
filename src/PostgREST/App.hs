@@ -199,7 +199,10 @@ handleRequest dbStructure conf contentType apiRequest =
         )
 
     (ApiRequest.ActionCreate, ApiRequest.TargetIdent identifier) ->
-      handleCreate conf dbStructure apiRequest contentType identifier
+      either identity identity <$>
+        (runExceptT $
+          handleCreate conf dbStructure apiRequest contentType identifier
+        )
 
     (ApiRequest.ActionUpdate, ApiRequest.TargetIdent identifier) ->
       handleUpdate conf dbStructure apiRequest contentType identifier
@@ -339,77 +342,65 @@ handleCreate
   -> ApiRequest
   -> ContentType
   -> Types.QualifiedIdentifier
-  -> Hasql.Transaction Wai.Response
+  -> DbHandler Wai.Response
 handleCreate conf dbStructure apiRequest contentType identifier =
-  case mutateSqlParts conf dbStructure apiRequest identifier of
-    Left errorResponse -> return errorResponse
-    Right (sq, mq) ->
-      let
-        pkCols =
-          Types.tablePKCols
-            dbStructure
-            (Types.qiSchema identifier)
-            (Types.qiName identifier)
+  do
+    (sq, mq) <-
+      liftEither $ mutateSqlParts conf dbStructure apiRequest identifier
 
-        stm =
-          Statements.createWriteStatement
-            sq
-            mq
-            (contentType == Types.CTSingularJSON)
-            True
-            (contentType == Types.CTTextCSV)
-            (ApiRequest.iPreferRepresentation apiRequest)
-            pkCols
-            (Types.pgVersion dbStructure)
-            (Config.configDbPreparedStatements conf)
-      in
-      do
-        (_, queryTotal, fields, body, gucHeaders, gucStatus) <-
-          Hasql.statement mempty stm
+    let
+      pkCols =
+        Types.tablePKCols dbStructure (Types.qiSchema identifier) (Types.qiName identifier)
 
-        let
-          gucs =
-            (,) <$> gucHeaders <*> gucStatus
+    (_, queryTotal, fields, body, gucHeaders, gucStatus) <-
+      lift $ Hasql.statement mempty $
+        Statements.createWriteStatement
+          sq
+          mq
+          (contentType == Types.CTSingularJSON)
+          True
+          (contentType == Types.CTTextCSV)
+          (ApiRequest.iPreferRepresentation apiRequest)
+          pkCols
+          (Types.pgVersion dbStructure)
+          (Config.configDbPreparedStatements conf)
 
-        case gucs of
-          Left err -> return $ Error.errorResponseFor err
-          Right (ghdrs, gstatus) -> do
-            let
-              (ctHeaders, rBody) =
-                if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
-                  ([Just $ Types.toHeader contentType, profileH apiRequest], toS body)
-                else
-                  ([], mempty)
+    ghdrs <- liftEither $ mapLeft Error.errorResponseFor gucHeaders
+    gstatus <- liftEither $ mapLeft Error.errorResponseFor gucStatus
 
-              status =
-                fromMaybe HTTP.status201 gstatus
+    let
+      (ctHeaders, rBody) =
+        if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
+          ([Just $ Types.toHeader contentType, profileH apiRequest], toS body)
+        else
+          ([], mempty)
 
-              headers =
-                Types.addHeadersIfNotIncluded
-                  (catMaybes (
-                    [ if null fields then
-                        Nothing
-                      else
-                        Just $ locationH (Types.qiName identifier) fields
-                    , Just $
-                        RangeQuery.contentRangeH
-                          1
-                          0
-                          (if shouldCount apiRequest then Just queryTotal else Nothing)
-                    , if null pkCols && isNothing (ApiRequest.iOnConflict apiRequest) then
-                        Nothing
-                      else
-                        (\x -> ("Preference-Applied", Char8ByteString.pack (show x))) <$>
-                          ApiRequest.iPreferResolution apiRequest
-                    ] ++ ctHeaders)
-                  )
-                  (Types.unwrapGucHeader <$> ghdrs)
-            if contentType == Types.CTSingularJSON && queryTotal /= 1 then
-              do
-                Hasql.condemn
-                return . Error.errorResponseFor . Error.singularityError $ queryTotal
-            else
-              return $ Wai.responseLBS status headers rBody
+      headers =
+        Types.addHeadersIfNotIncluded
+          (catMaybes (
+            [ if null fields then
+                Nothing
+              else
+                Just $ locationH (Types.qiName identifier) fields
+            , Just $
+                RangeQuery.contentRangeH
+                  1
+                  0
+                  (if shouldCount apiRequest then Just queryTotal else Nothing)
+            , if null pkCols && isNothing (ApiRequest.iOnConflict apiRequest) then
+                Nothing
+              else
+                (\x -> ("Preference-Applied", Char8ByteString.pack (show x))) <$>
+                  ApiRequest.iPreferResolution apiRequest
+            ] ++ ctHeaders)
+          )
+          (Types.unwrapGucHeader <$> ghdrs)
+
+    ExceptT $ failNotSingular contentType queryTotal $
+      Wai.responseLBS
+        (fromMaybe HTTP.status201 gstatus)
+        headers
+        rBody
 
 
 handleUpdate
