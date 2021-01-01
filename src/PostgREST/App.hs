@@ -350,8 +350,8 @@ handleCreate
   -> DbHandler Wai.Response
 handleCreate conf dbStructure apiRequest contentType identifier =
   do
-    (sq, mq) <-
-      liftEither $ mutateSqlParts conf dbStructure apiRequest identifier
+    sq <- liftEither $ readQuery conf dbStructure identifier apiRequest
+    mq <- liftEither $ mutateQuery conf dbStructure identifier apiRequest
 
     let
       pkCols =
@@ -413,8 +413,8 @@ handleUpdate
   -> DbHandler Wai.Response
 handleUpdate conf dbStructure apiRequest contentType identifier =
   do
-    (sq, mq) <-
-      liftEither $ mutateSqlParts conf dbStructure apiRequest identifier
+    sq <- liftEither $ readQuery conf dbStructure identifier apiRequest
+    mq <- liftEither $ mutateQuery conf dbStructure identifier apiRequest
 
     (_, queryTotal, _, body, gucHeaders, gucStatus) <-
       lift $ Hasql.statement mempty $
@@ -475,7 +475,8 @@ handleSingleUpsert conf dbStructure apiRequest contentType identifier =
     when (ApiRequest.iTopLevelRange apiRequest /= RangeQuery.allRange) $
       throwError $ Error.errorResponseFor Error.PutRangeNotAllowedError
 
-    (sq, mq) <- liftEither $ mutateSqlParts conf dbStructure apiRequest identifier
+    sq <- liftEither $ readQuery conf dbStructure identifier apiRequest
+    mq <- liftEither $ mutateQuery conf dbStructure identifier apiRequest
 
     (_, queryTotal, _, body, gucHeaders, gucStatus) <-
       lift $ Hasql.statement mempty $
@@ -523,7 +524,8 @@ handleDelete
   -> DbHandler Wai.Response
 handleDelete conf dbStructure contentType apiRequest identifier =
   do
-    (sq, mq) <- liftEither $ mutateSqlParts conf dbStructure apiRequest identifier
+    sq <- liftEither $ readQuery conf dbStructure identifier apiRequest
+    mq <- liftEither $ mutateQuery conf dbStructure identifier apiRequest
 
     (_, queryTotal, _, body, gucHeaders, gucStatus) <-
       lift $ Hasql.statement mempty $
@@ -536,9 +538,6 @@ handleDelete conf dbStructure contentType apiRequest identifier =
           []
           (Types.pgVersion dbStructure)
           (Config.configDbPreparedStatements conf)
-
-    ghdrs <- liftEither $ mapLeft Error.errorResponseFor gucHeaders
-    gstatus <- liftEither $ mapLeft Error.errorResponseFor gucStatus
 
     let
       defStatus =
@@ -558,12 +557,13 @@ handleDelete conf dbStructure contentType apiRequest identifier =
           ([], mempty)
 
       headers =
-        Types.addHeadersIfNotIncluded
-          (catMaybes ctHeaders ++ [contentRangeHeader])
-          (Types.unwrapGucHeader <$> ghdrs)
+        catMaybes ctHeaders ++ [contentRangeHeader]
 
-    failNotSingular contentType queryTotal $
-      Wai.responseLBS (fromMaybe defStatus gstatus) headers rBody
+    response <-
+      liftEither $ mapLeft Error.errorResponseFor $
+        gucResponse defStatus headers rBody <$> gucHeaders <*> gucStatus
+
+    failNotSingular contentType queryTotal response
 
 
 handleInfo :: DbStructure -> Types.QualifiedIdentifier -> Either Wai.Response Wai.Response
@@ -649,9 +649,6 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
             (Types.pgVersion dbStructure)
             (Config.configDbPreparedStatements conf)
 
-    ghdrs <- liftEither $ mapLeft Error.errorResponseFor gucHeaders
-    gstatus <- liftEither $ mapLeft Error.errorResponseFor gucStatus
-
     let
       (rangeStatus, contentRange) =
         RangeQuery.rangeStatusHeader
@@ -660,21 +657,20 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
           tableTotal
 
       headers =
-        Types.addHeadersIfNotIncluded
-          (catMaybes
-            [ Just $ Types.toHeader contentType
-            , Just contentRange
-            , profileH apiRequest
-            ]
-          )
-          (Types.unwrapGucHeader <$> ghdrs)
+        catMaybes
+          [ Just $ Types.toHeader contentType
+          , Just contentRange
+          , profileH apiRequest
+          ]
 
+      rBody =
+        if invMethod == ApiRequest.InvHead then mempty else toS body
 
-    failNotSingular contentType queryTotal $
-      Wai.responseLBS
-        (fromMaybe rangeStatus gstatus)
-        headers
-        (if invMethod == ApiRequest.InvHead then mempty else toS body)
+    response <-
+      liftEither $ mapLeft Error.errorResponseFor $
+        gucResponse rangeStatus headers rBody <$> gucHeaders <*> gucStatus
+
+    failNotSingular contentType queryTotal response
 
 
 -- | Fail a response if a single JSON object was requested and not exactly one
@@ -738,7 +734,7 @@ openApiTableInfo dbStructure table =
 
 notFound :: Wai.Response
 notFound =
-  Wai.responseLBS HTTP.status404 [] mempty
+  Wai.responseLBS HTTP.status404 mempty mempty
 
 
 estimatedCount :: ApiRequest -> Bool
@@ -771,18 +767,6 @@ returnsSingle apiRequest =
       Types.procReturnsSingle proc
     _ ->
       False
-
-
-mutateSqlParts
-  :: AppConfig
-  -> DbStructure
-  -> ApiRequest
-  -> Types.QualifiedIdentifier
-  -> Either Wai.Response (Hasql.Snippet, Hasql.Snippet)
-mutateSqlParts conf dbStructure apiRequest identifier =
-  (,) <$>
-    (readQuery conf dbStructure identifier apiRequest) <*>
-    (mutateQuery conf dbStructure identifier apiRequest)
 
 
 readQuery
