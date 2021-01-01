@@ -211,7 +211,10 @@ handleRequest dbStructure conf contentType apiRequest =
         )
 
     (ApiRequest.ActionSingleUpsert, ApiRequest.TargetIdent identifier) ->
-      handleSingleUpsert conf dbStructure apiRequest contentType identifier
+      either identity identity <$>
+        (runExceptT $
+          handleSingleUpsert conf dbStructure apiRequest contentType identifier
+        )
 
     (ApiRequest.ActionDelete, ApiRequest.TargetIdent identifier) ->
       handleDelete conf dbStructure contentType apiRequest identifier
@@ -476,64 +479,55 @@ handleSingleUpsert
   -> ApiRequest
   -> ContentType
   -> Types.QualifiedIdentifier
-  -> Hasql.Transaction Wai.Response
+  -> DbHandler Wai.Response
 handleSingleUpsert conf dbStructure apiRequest contentType identifier =
-  case mutateSqlParts conf dbStructure apiRequest identifier of
-    Left errorResponse ->
-      return errorResponse
+  do
+    (sq, mq) <- liftEither $ mutateSqlParts conf dbStructure apiRequest identifier
 
-    Right (sq, mq) ->
-      if ApiRequest.iTopLevelRange apiRequest /= RangeQuery.allRange then
-        return . Error.errorResponseFor $ Error.PutRangeNotAllowedError
-      else
-        let
-          statement =
-              Statements.createWriteStatement
-                sq
-                mq
-                (contentType == Types.CTSingularJSON)
-                False
-                (contentType == Types.CTTextCSV)
-                (ApiRequest.iPreferRepresentation apiRequest)
-                []
-                (Types.pgVersion dbStructure)
-                (Config.configDbPreparedStatements conf)
-        in
-        do
-          (_, queryTotal, _, body, gucHeaders, gucStatus) <-
-            Hasql.statement mempty statement
+    when (ApiRequest.iTopLevelRange apiRequest /= RangeQuery.allRange) $
+      throwError $ Error.errorResponseFor Error.PutRangeNotAllowedError
 
-          let
-            gucs =  (,) <$> gucHeaders <*> gucStatus
+    (_, queryTotal, _, body, gucHeaders, gucStatus) <-
+      lift $ Hasql.statement mempty $
+        Statements.createWriteStatement
+          sq
+          mq
+          (contentType == Types.CTSingularJSON)
+          False
+          (contentType == Types.CTTextCSV)
+          (ApiRequest.iPreferRepresentation apiRequest)
+          []
+          (Types.pgVersion dbStructure)
+          (Config.configDbPreparedStatements conf)
 
-          case gucs of
-            Left err -> return $ Error.errorResponseFor err
-            Right (ghdrs, gstatus) -> do
-              let
-                headers =
-                  Types.addHeadersIfNotIncluded
-                    (catMaybes [Just $ Types.toHeader contentType, profileH apiRequest])
-                    (Types.unwrapGucHeader <$> ghdrs)
+    ghdrs <- liftEither $ mapLeft Error.errorResponseFor gucHeaders
+    gstatus <- liftEither $ mapLeft Error.errorResponseFor gucStatus
 
-                (defStatus, rBody) =
-                  if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
-                    (HTTP.status200, toS body)
-                  else
-                    (HTTP.status204, mempty)
+    let
+      headers =
+        Types.addHeadersIfNotIncluded
+          (catMaybes [Just $ Types.toHeader contentType, profileH apiRequest])
+          (Types.unwrapGucHeader <$> ghdrs)
 
-                status = fromMaybe defStatus gstatus
+      (defStatus, rBody) =
+        if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
+          (HTTP.status200, toS body)
+        else
+          (HTTP.status204, mempty)
 
-              -- Makes sure the querystring pk matches the payload pk
-              -- e.g. PUT /items?id=eq.1 { "id" : 1, .. } is accepted,
-              -- PUT /items?id=eq.14 { "id" : 2, .. } is rejected
-              -- If this condition is not satisfied then nothing is inserted,
-              -- check the WHERE for INSERT in QueryBuilder.hs to see how it's done
-              if queryTotal /= 1 then
-                do
-                  Hasql.condemn
-                  return . Error.errorResponseFor $ Error.PutMatchingPkError
-              else
-                return $ Wai.responseLBS status headers rBody
+      status = fromMaybe defStatus gstatus
+
+    -- Makes sure the querystring pk matches the payload pk
+    -- e.g. PUT /items?id=eq.1 { "id" : 1, .. } is accepted,
+    -- PUT /items?id=eq.14 { "id" : 2, .. } is rejected
+    -- If this condition is not satisfied then nothing is inserted,
+    -- check the WHERE for INSERT in QueryBuilder.hs to see how it's done
+    if queryTotal /= 1 then
+      do
+        lift Hasql.condemn
+        throwError $ Error.errorResponseFor Error.PutMatchingPkError
+    else
+      return $ Wai.responseLBS status headers rBody
 
 
 handleDelete
