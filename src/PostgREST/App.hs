@@ -54,12 +54,17 @@ import Protolude.Conv (toS)
 -- TYPES
 
 
-type JWTClaims =
-  HashMap.HashMap Text Aeson.Value
+-- | Wai.Response is the error type, to be replaced by something from Error
+type IOHandler =
+  ExceptT Wai.Response IO
 
 
 type DbHandler =
   ExceptT Wai.Response Hasql.Transaction
+
+
+type JWTClaims =
+  HashMap.HashMap Text Aeson.Value
 
 
 
@@ -77,7 +82,19 @@ postgrest
 postgrest logLev refConf refDbStructure pool getTime connWorker =
   Middleware.pgrstMiddleware logLev $
     \req respond ->
-      respond =<< postgrestApp refConf refDbStructure pool getTime connWorker req
+      do
+        resp <-
+          runExceptT $ postgrestApp refConf refDbStructure pool getTime req
+
+        let
+          response = either identity identity resp
+
+        -- Launch the connWorker when the connection is down.
+        -- The postgrest function can respond successfully (with a stale schema
+        -- cache) before the connWorker is done.
+        when (Wai.responseStatus response == HTTP.status503) connWorker
+
+        respond response
 
 
 postgrestApp
@@ -85,69 +102,45 @@ postgrestApp
   -> IORef (Maybe DbStructure)
   -> Hasql.Pool
   -> IO UTCTime
-  -> IO ()
   -> Wai.Request
-  -> IO Wai.Response
-postgrestApp refConf refDbStructure pool getTime connWorker req =
-  let
-    apiReq conf' req' body' dbStructure' =
-      ApiRequest.userApiRequest
-        (Config.configDbSchemas conf')
-        (Config.configDbRootSpec conf')
-        dbStructure'
-        req'
-        body'
-  in
+  -> IOHandler Wai.Response
+postgrestApp refConf refDbStructure pool getTime req =
   do
-    time <- getTime
-    conf <- readIORef refConf
-    body <- Wai.strictRequestBody req
-    eitherDbStructure <-
-      maybeToRight
+    time <- lift $ getTime
+    conf <- lift $ readIORef refConf
+    body <- lift $ Wai.strictRequestBody req
+
+    maybeDbStructure <-
+      lift $ readIORef refDbStructure
+
+    dbStructure <-
+      liftEither $ maybeToRight
         (Error.errorResponseFor Error.ConnectionLostError)
-        <$> readIORef refDbStructure
+        maybeDbStructure
 
-    let
-      _ = apiReq conf req body <$> eitherDbStructure
+    apiRequest <-
+      liftEither $
+        mapLeft Error.errorResponseFor $
+          ApiRequest.userApiRequest
+            (Config.configDbSchemas conf)
+            (Config.configDbRootSpec conf)
+            dbStructure
+            req
+            body
 
-    case eitherDbStructure of
-      Left err ->
-        return err
+    -- The jwt must be checked before touching the db.
+    rawClaims <-
+      liftIO $ mapLeft Error.errorResponseFor
+        <$> jwtClaims conf apiRequest time
 
-      Right dbStructure ->
-        case apiReq conf req body dbStructure of
-          Left err ->
-            return $ Error.errorResponseFor err
+    claims <- liftEither $ rawClaims
 
-          Right apiRequest ->
-            do
-              -- The jwt must be checked before touching the db.
-              clms <-
-                mapLeft Error.errorResponseFor
-                  <$> jwtClaims conf apiRequest time
+    contentType <- liftEither $ getContentType conf apiRequest
 
-              case clms of
-                Left err ->
-                  return err
+    resp <-
+      lift $ postgrestResponse conf pool dbStructure apiRequest claims contentType
 
-                Right claims ->
-                  case getContentType conf apiRequest of
-                    Left err ->
-                      return $ err
-
-                    Right contentType ->
-                      do
-                        response <-
-                          (either identity identity <$>
-                            postgrestResponse conf pool dbStructure apiRequest claims contentType
-                          )
-
-                        -- Launch the connWorker when the connection is down.
-                        -- The postgrest function can respond successfully (with a stale schema
-                        -- cache) before the connWorker is done.
-                        when (Wai.responseStatus response == HTTP.status503) connWorker
-
-                        return response
+    liftEither resp
 
 
 
