@@ -223,7 +223,7 @@ handleRequest dbStructure conf contentType apiRequest =
         )
 
     (ApiRequest.ActionInfo, ApiRequest.TargetIdent identifier) ->
-      return $ handleInfo dbStructure identifier
+      return $ either identity identity $ handleInfo dbStructure identifier
 
     (ApiRequest.ActionInvoke invMethod, ApiRequest.TargetProc proc _) ->
       either identity identity <$>
@@ -582,11 +582,11 @@ handleDelete conf dbStructure contentType apiRequest identifier =
       Wai.responseLBS (fromMaybe defStatus gstatus) headers rBody
 
 
-handleInfo :: DbStructure -> Types.QualifiedIdentifier -> Wai.Response
+handleInfo :: DbStructure -> Types.QualifiedIdentifier -> Either Wai.Response Wai.Response
 handleInfo dbStructure identifier =
   case findTable dbStructure identifier of
     Nothing ->
-      notFound
+      Left notFound
 
     Just table ->
       let
@@ -601,7 +601,7 @@ handleInfo dbStructure identifier =
         allOrigins =
           ("Access-Control-Allow-Origin", "*") :: HTTP.Header
       in
-      Wai.responseLBS HTTP.status200 [allOrigins, allowH] mempty
+      Right $ Wai.responseLBS HTTP.status200 [allOrigins, allowH] mempty
 
 
 findTable :: DbStructure -> Types.QualifiedIdentifier -> Maybe Types.Table
