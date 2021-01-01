@@ -490,22 +490,15 @@ handleSingleUpsert conf dbStructure apiRequest contentType identifier =
           (Types.pgVersion dbStructure)
           (Config.configDbPreparedStatements conf)
 
-    ghdrs <- liftEither $ mapLeft Error.errorResponseFor gucHeaders
-    gstatus <- liftEither $ mapLeft Error.errorResponseFor gucStatus
-
     let
       headers =
-        Types.addHeadersIfNotIncluded
-          (catMaybes [Just $ Types.toHeader contentType, profileH apiRequest])
-          (Types.unwrapGucHeader <$> ghdrs)
+        catMaybes [Just $ Types.toHeader contentType, profileH apiRequest]
 
       (defStatus, rBody) =
         if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
           (HTTP.status200, toS body)
         else
           (HTTP.status204, mempty)
-
-      status = fromMaybe defStatus gstatus
 
     -- Makes sure the querystring pk matches the payload pk
     -- e.g. PUT /items?id=eq.1 { "id" : 1, .. } is accepted,
@@ -517,7 +510,8 @@ handleSingleUpsert conf dbStructure apiRequest contentType identifier =
         lift Hasql.condemn
         throwError $ Error.errorResponseFor Error.PutMatchingPkError
     else
-      return $ Wai.responseLBS status headers rBody
+      liftEither $ mapLeft Error.errorResponseFor $
+        gucResponse defStatus headers rBody <$> gucHeaders <*> gucStatus
 
 
 handleDelete
