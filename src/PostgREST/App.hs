@@ -54,11 +54,6 @@ import Protolude.Conv (toS)
 -- TYPES
 
 
--- | Wai.Response is the error type, to be replaced by something from Error
-type IOHandler =
-  ExceptT Wai.Response IO
-
-
 type DbHandler =
   ExceptT Wai.Response Hasql.Transaction
 
@@ -79,11 +74,13 @@ postgrest logLev refConf refDbStructure pool getTime connWorker =
   Middleware.pgrstMiddleware logLev $
     \req respond ->
       do
-        resp <-
-          runExceptT $ postgrestApp refConf refDbStructure pool getTime req
+        time <- getTime
+        conf <- readIORef refConf
+        maybeDbStructure <- readIORef refDbStructure
 
-        let
-          response = either identity identity resp
+        response <-
+          either identity identity <$>
+            postgrestApp conf maybeDbStructure pool time req
 
         -- Launch the connWorker when the connection is down.
         -- The postgrest function can respond successfully (with a stale schema
@@ -94,69 +91,69 @@ postgrest logLev refConf refDbStructure pool getTime connWorker =
 
 
 postgrestApp
-  :: IORef AppConfig
-  -> IORef (Maybe DbStructure)
+  :: AppConfig
+  -> Maybe DbStructure
   -> Hasql.Pool
-  -> IO UTCTime
+  -> UTCTime
   -> Wai.Request
-  -> IOHandler Wai.Response
-postgrestApp refConf refDbStructure pool getTime req =
-  do
-    time <- lift $ getTime
-    conf <- lift $ readIORef refConf
-    body <- lift $ Wai.strictRequestBody req
+  -> IO (Either Wai.Response Wai.Response)
+postgrestApp conf maybeDbStructure pool time req =
+  runExceptT $
+    do
+      body <- lift $ Wai.strictRequestBody req
 
-    maybeDbStructure <-
-      lift $ readIORef refDbStructure
+      dbStructure <-
+        liftEither $ maybeToRight
+          (Error.errorResponseFor Error.ConnectionLostError)
+          maybeDbStructure
 
-    dbStructure <-
-      liftEither $ maybeToRight
-        (Error.errorResponseFor Error.ConnectionLostError)
-        maybeDbStructure
+      apiRequest <-
+        liftEither . mapLeft Error.errorResponseFor $
+            ApiRequest.userApiRequest
+              (Config.configDbSchemas conf)
+              (Config.configDbRootSpec conf)
+              dbStructure
+              req
+              body
 
-    apiRequest <-
+      -- The jwt must be checked before touching the db.
+      rawClaims <-
+        liftIO $ Auth.jwtClaims <$>
+            Auth.attemptJwtClaims
+              (Config.configJWKS conf)
+              (Config.configJwtAudience conf)
+              (toS $ ApiRequest.iJWT apiRequest)
+              time
+              (rightToMaybe $ Config.configJwtRoleClaimKey conf)
+
+      claims <-
+        liftEither $ mapLeft Error.errorResponseFor rawClaims
+
+      contentType <-
+        liftEither . maybeToRight (contentTypeError apiRequest) $
+          responseContentType conf apiRequest
+
+      dbResp <-
+        lift $ Hasql.use pool $
+          Hasql.transaction Hasql.ReadCommitted (txMode apiRequest) $
+            optionalRollback conf apiRequest $
+              Middleware.runPgLocals
+                conf
+                claims
+                (\r -> either identity identity <$>
+                  runExceptT (handleRequest dbStructure conf contentType r)
+                )
+                apiRequest
+
       liftEither $
-        mapLeft Error.errorResponseFor $
-          ApiRequest.userApiRequest
-            (Config.configDbSchemas conf)
-            (Config.configDbRootSpec conf)
-            dbStructure
-            req
-            body
+        mapLeft (Error.errorResponseFor . Error.PgError (Auth.containsRole claims))
+        dbResp
 
-    -- The jwt must be checked before touching the db.
-    rawClaims <-
-      liftIO $
-        Auth.jwtClaims <$>
-          Auth.attemptJwtClaims
-            (Config.configJWKS conf)
-            (Config.configJwtAudience conf)
-            (toS $ ApiRequest.iJWT apiRequest)
-            time
-            (rightToMaybe $ Config.configJwtRoleClaimKey conf)
 
-    claims <-
-      liftEither $ mapLeft Error.errorResponseFor rawClaims
-
-    contentType <-
-      liftEither $ mapLeft Error.errorResponseFor $
-        responseContentType conf apiRequest
-
-    dbResp <-
-      lift $ Hasql.use pool $
-        Hasql.transaction Hasql.ReadCommitted (txMode apiRequest) $
-          optionalRollback conf apiRequest $
-            Middleware.runPgLocals
-              conf
-              claims
-              (\r -> either identity identity <$>
-                (runExceptT $ handleRequest dbStructure conf contentType r)
-              )
-              apiRequest
-
-    liftEither $
-      mapLeft (Error.errorResponseFor . Error.PgError (Auth.containsRole claims))
-      dbResp
+contentTypeError :: ApiRequest -> Wai.Response
+contentTypeError apiRequest =
+  Error.errorResponseFor . Error.ContentTypeError $
+    map Types.toMime (ApiRequest.iAccepts apiRequest)
 
 
 txMode :: ApiRequest -> Hasql.Mode
@@ -277,18 +274,26 @@ handleRead conf dbStructure apiRequest headersOnly contentType identifier =
           queryTotal
           total
 
+      qString =
+        ApiRequest.iCanonicalQS apiRequest
+
       headers =
         catMaybes
           [ Just $ Types.toHeader contentType, Just contentRange
           , Just $
-              contentLocationH
-                (Types.qiName identifier)
-                (ApiRequest.iCanonicalQS apiRequest)
-          , profileH apiRequest
+              ( "Content-Location"
+              , "/"
+                  <> toS (Types.qiName identifier)
+                  <> if Char8ByteString.null qString then
+                       mempty
+                     else
+                       "?" <> toS qString
+              )
+          , profileHeader apiRequest
           ]
 
     response <-
-      liftEither $ mapLeft Error.errorResponseFor $
+      liftEither . mapLeft Error.errorResponseFor $
         gucResponse rangeStatus headers (if headersOnly then mempty else toS body)
           <$> gucHeaders
           <*> gucStatus
@@ -373,16 +378,28 @@ handleCreate conf dbStructure apiRequest contentType identifier =
     let
       (ctHeaders, rBody) =
         if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
-          ([Just $ Types.toHeader contentType, profileH apiRequest], toS body)
+          ([Just $ Types.toHeader contentType, profileHeader apiRequest], toS body)
         else
           ([], mempty)
+
+      splitKeyValue kv =
+        let
+          (k, v) =
+            Char8ByteString.break (== '=') kv
+        in
+          (k, Char8ByteString.tail v)
 
       headers =
         catMaybes
           ( [ if null fields then
                 Nothing
               else
-                Just $ locationH (Types.qiName identifier) fields
+                Just
+                  ( HTTP.hLocation
+                  , "/"
+                      <> toS (Types.qiName identifier)
+                      <> HTTP.renderSimpleQuery True (splitKeyValue <$> fields)
+                  )
             , Just $
                 RangeQuery.contentRangeH
                   1
@@ -449,7 +466,7 @@ handleUpdate conf dbStructure apiRequest contentType identifier =
 
       (ctHeaders, rBody) =
         if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
-          ([Just $ Types.toHeader contentType, profileH apiRequest], toS body)
+          ([Just $ Types.toHeader contentType, profileHeader apiRequest], toS body)
         else
           ([], mempty)
 
@@ -493,7 +510,7 @@ handleSingleUpsert conf dbStructure apiRequest contentType identifier =
 
     let
       headers =
-        catMaybes [Just $ Types.toHeader contentType, profileH apiRequest]
+        catMaybes [Just $ Types.toHeader contentType, profileHeader apiRequest]
 
       (defStatus, rBody) =
         if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
@@ -540,24 +557,27 @@ handleDelete conf dbStructure contentType apiRequest identifier =
           (Config.configDbPreparedStatements conf)
 
     let
+      fullRepr =
+        ApiRequest.iPreferRepresentation apiRequest == Types.Full
+
       defStatus =
-        if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
-          HTTP.status200
-        else
-          HTTP.status204
+        if fullRepr then HTTP.status200 else HTTP.status204
 
       contentRangeHeader =
         RangeQuery.contentRangeH 1 0 $
           if shouldCount apiRequest then Just queryTotal else Nothing
 
-      (ctHeaders, rBody) =
-        if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
-          ([Just $ Types.toHeader contentType, profileH apiRequest], toS body)
-        else
-          ([], mempty)
+      ctHeaders =
+        catMaybes
+          [ Just $ Types.toHeader contentType
+          , profileHeader apiRequest
+          ]
+
+      rBody =
+        if fullRepr then toS body else mempty
 
       headers =
-        catMaybes ctHeaders ++ [contentRangeHeader]
+        (if fullRepr then ctHeaders else []) ++ [contentRangeHeader]
 
     response <-
       liftEither $ mapLeft Error.errorResponseFor $
@@ -568,34 +588,24 @@ handleDelete conf dbStructure contentType apiRequest identifier =
 
 handleInfo :: DbStructure -> Types.QualifiedIdentifier -> Either Wai.Response Wai.Response
 handleInfo dbStructure identifier =
+  let
+    allowH table =
+      ( HTTP.hAllow
+      , if Types.tableInsertable table then
+          "GET,POST,PATCH,DELETE"
+        else
+          "GET"
+      )
+
+    allOrigins =
+      ("Access-Control-Allow-Origin", "*")
+  in
   case findTable dbStructure identifier of
+    Just table ->
+      Right $ Wai.responseLBS HTTP.status200 [allOrigins, allowH table] mempty
+
     Nothing ->
       Left notFound
-
-    Just table ->
-      let
-        allowH =
-          ( HTTP.hAllow
-          , if Types.tableInsertable table then
-              "GET,POST,PATCH,DELETE"
-            else
-              "GET"
-          )
-
-        allOrigins =
-          ("Access-Control-Allow-Origin", "*") :: HTTP.Header
-      in
-      Right $ Wai.responseLBS HTTP.status200 [allOrigins, allowH] mempty
-
-
-findTable :: DbStructure -> Types.QualifiedIdentifier -> Maybe Types.Table
-findTable dbStructure identifier =
-  find
-    (\t ->
-      Types.tableName t == Types.qiName identifier
-      && Types.tableSchema t == Types.qiSchema identifier
-    )
-    (Types.dbTables dbStructure)
 
 
 handleInvoke
@@ -660,7 +670,7 @@ handleInvoke conf dbStructure invMethod contentType apiRequest proc =
         catMaybes
           [ Just $ Types.toHeader contentType
           , Just contentRange
-          , profileH apiRequest
+          , profileHeader apiRequest
           ]
 
       rBody =
@@ -712,7 +722,7 @@ handleOpenApi conf dbStructure apiRequest headersOnly tSchema =
     return $
       Wai.responseLBS
         HTTP.status200
-        (catMaybes [Just $ Types.toHeader Types.CTOpenAPI, profileH apiRequest])
+        (catMaybes [Just $ Types.toHeader Types.CTOpenAPI, profileHeader apiRequest])
         (if headersOnly then mempty else toS body)
 
 
@@ -786,13 +796,12 @@ readRequest
   -> Types.QualifiedIdentifier
   -> ApiRequest
   -> Either Wai.Response Types.ReadRequest
-readRequest conf dbStructure identifier apiRequest =
+readRequest conf dbStructure identifier =
   DbRequestBuilder.readRequest
     (Types.qiSchema identifier)
     (Types.qiName identifier)
     (Config.configDbMaxRows conf)
     (Types.dbRelations dbStructure)
-    apiRequest
 
 
 mutateQuery
@@ -822,10 +831,7 @@ rawContentTypes conf =
   [ Types.CTOctetStream, Types.CTTextPlain ]
 
 
-responseContentType
-  :: AppConfig
-  -> ApiRequest
-  -> Either Error.SimpleError ContentType
+responseContentType :: AppConfig -> ApiRequest -> Maybe ContentType
 responseContentType conf apiRequest =
   let
     produces =
@@ -833,16 +839,8 @@ responseContentType conf apiRequest =
         (rawContentTypes conf)
         (ApiRequest.iAction apiRequest)
         (ApiRequest.iTarget apiRequest)
-
-    accepts =
-      ApiRequest.iAccepts apiRequest
   in
-  case ApiRequest.mutuallyAgreeable produces accepts of
-    Just contentType ->
-      Right contentType
-
-    Nothing ->
-      Left . Error.ContentTypeError . map Types.toMime $ accepts
+  ApiRequest.mutuallyAgreeable produces (ApiRequest.iAccepts apiRequest)
 
 
 requestContentTypes
@@ -854,20 +852,27 @@ requestContentTypes contentTypes action target =
   case action of
     ApiRequest.ActionRead _ ->
       defaultContentTypes ++ contentTypes
+
     ApiRequest.ActionCreate ->
       defaultContentTypes
+
     ApiRequest.ActionUpdate ->
       defaultContentTypes
+
     ApiRequest.ActionDelete ->
       defaultContentTypes
+
     ApiRequest.ActionInvoke _ ->
       defaultContentTypes
         ++ contentTypes
         ++ [Types.CTOpenAPI | ApiRequest.tpIsRootSpec target]
+
     ApiRequest.ActionInspect _ ->
       [Types.CTOpenAPI, Types.CTApplicationJSON]
+
     ApiRequest.ActionInfo ->
       [Types.CTTextCSV]
+
     ApiRequest.ActionSingleUpsert ->
       defaultContentTypes
 
@@ -908,41 +913,12 @@ binaryField ct contentTypes isScalarProc readReq
 -- HEADERS
 
 
-profileH :: ApiRequest -> Maybe HTTP.Header
-profileH apiRequest =
+profileHeader :: ApiRequest -> Maybe HTTP.Header
+profileHeader apiRequest =
   contentProfileH <$> ApiRequest.iProfile apiRequest
-
-
-locationH :: Types.TableName -> [Char8ByteString.ByteString] -> HTTP.Header
-locationH tName fields =
-  ( HTTP.hLocation
-  , "/" <> toS tName <> (HTTP.renderSimpleQuery True $ splitKeyValue <$> fields)
-  )
-
-
-splitKeyValue
-  :: Char8ByteString.ByteString
-  -> (Char8ByteString.ByteString, Char8ByteString.ByteString)
-splitKeyValue kv =
-  let
-    (k, v) =
-      Char8ByteString.break (== '=') kv
-  in
-    (k, Char8ByteString.tail v)
-
-
-contentLocationH :: Types.TableName -> ByteString -> HTTP.Header
-contentLocationH tName qString =
-  ( "Content-Location"
-  , "/" <> toS tName <> if Char8ByteString.null qString then mempty else "?" <> toS qString
-  )
-
-
-contentProfileH :: Types.Schema -> HTTP.Header
-contentProfileH schema =
-  ( "Content-Profile"
-  , toS schema
-  )
+  where
+    contentProfileH schema =
+      ("Content-Profile", toS schema)
 
 
 
@@ -989,20 +965,31 @@ optionalRollback conf apiRequest transaction =
 
 openApiUri :: AppConfig -> (Text, Text, Integer, Text)
 openApiUri conf =
-  let
-    maybeProxy =
-      OpenAPI.pickProxy $ toS <$> Config.configOpenApiServerProxyUri conf
-  in
-    case maybeProxy of
-      Just proxy ->
-        ( Types.proxyScheme proxy
-        , Types.proxyHost proxy
-        , Types.proxyPort proxy
-        , Types.proxyPath proxy
-        )
-      Nothing ->
-        ("http"
-        , Config.configServerHost conf
-        , toInteger $ Config.configServerPort conf
-        , "/"
-        )
+  case OpenAPI.pickProxy $ toS <$> Config.configOpenApiServerProxyUri conf of
+    Just proxy ->
+      ( Types.proxyScheme proxy
+      , Types.proxyHost proxy
+      , Types.proxyPort proxy
+      , Types.proxyPath proxy
+      )
+
+    Nothing ->
+      ("http"
+      , Config.configServerHost conf
+      , toInteger $ Config.configServerPort conf
+      , "/"
+      )
+
+
+-- TYPES helpers - to be moved to Types.hs
+
+
+findTable :: DbStructure -> Types.QualifiedIdentifier -> Maybe Types.Table
+findTable dbStructure identifier =
+  find tableMatches (Types.dbTables dbStructure)
+    where
+      tableMatches table =
+        Types.tableName table == Types.qiName identifier
+        && Types.tableSchema table == Types.qiSchema identifier
+
+
