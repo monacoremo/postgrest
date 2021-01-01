@@ -17,6 +17,7 @@ import Data.Either.Combinators (mapLeft)
 import Control.Monad.Except
 
 import qualified Data.ByteString.Char8 as Char8ByteString
+import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.List as List (union)
 import qualified Data.Set as Set
@@ -266,8 +267,6 @@ handleRead conf dbStructure apiRequest headersOnly contentType identifier =
           (Types.pgVersion dbStructure)
           (Config.configDbPreparedStatements conf)
 
-    ghdrs <- liftEither $ mapLeft Error.errorResponseFor gucHeaders
-    gstatus <- liftEither $ mapLeft Error.errorResponseFor gucStatus
 
     total <- lift $ readTotal conf tableTotal apiRequest cq
 
@@ -279,23 +278,36 @@ handleRead conf dbStructure apiRequest headersOnly contentType identifier =
           total
 
       headers =
-        Types.addHeadersIfNotIncluded
-          (catMaybes
-            [ Just $ Types.toHeader contentType, Just contentRange
-            , Just $
-                contentLocationH
-                  (Types.qiName identifier)
-                  (ApiRequest.iCanonicalQS apiRequest)
-            , profileH apiRequest
-            ]
-          )
-          (Types.unwrapGucHeader <$> ghdrs)
+        catMaybes
+          [ Just $ Types.toHeader contentType, Just contentRange
+          , Just $
+              contentLocationH
+                (Types.qiName identifier)
+                (ApiRequest.iCanonicalQS apiRequest)
+          , profileH apiRequest
+          ]
 
-    failNotSingular contentType queryTotal $
-      Wai.responseLBS
-        (fromMaybe rangeStatus gstatus)
-        headers
-        (if headersOnly then mempty else toS body)
+    response <-
+      liftEither $ mapLeft Error.errorResponseFor $
+        gucResponse rangeStatus headers (if headersOnly then mempty else toS body)
+          <$> gucHeaders
+          <*> gucStatus
+
+    failNotSingular contentType queryTotal response
+
+
+gucResponse
+  :: HTTP.Status
+  -> [HTTP.Header]
+  -> LazyByteString.ByteString
+  -> [Types.GucHeader]
+  -> Maybe HTTP.Status
+  -> Wai.Response
+gucResponse status headers body ghdrs gstatus =
+  Wai.responseLBS
+    (fromMaybe status gstatus)
+    (Types.addHeadersIfNotIncluded headers (Types.unwrapGucHeader <$> ghdrs))
+    body
 
 
 readTotal
