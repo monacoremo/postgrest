@@ -50,6 +50,8 @@ import Protolude hiding (toS, Handler)
 import Protolude.Conv (toS)
 
 
+-- TYPES
+
 
 data RequestContext =
   RequestContext
@@ -57,16 +59,6 @@ data RequestContext =
     , rDbStructure :: DbStructure
     , rApiRequest :: ApiRequest
     , rContentType :: ContentType
-    }
-
-
-data CreateResult =
-  CreateResult
-    { rQueryTotal :: Int64
-    , rFields :: [ByteString]
-    , rBody :: ByteString
-    , rGucHeaders :: [Types.GucHeader]
-    , rGucStatus :: Maybe HTTP.Status
     }
 
 
@@ -188,12 +180,6 @@ postgrestResponse conf maybeDbStructure pool time req =
         dbResp
 
 
-contentTypeError :: ApiRequest -> Wai.Response
-contentTypeError apiRequest =
-  Error.errorResponseFor . Error.ContentTypeError $
-    map Types.toMime (ApiRequest.iAccepts apiRequest)
-
-
 handleRequest :: RequestContext -> DbHandler Wai.Response
 handleRequest context@(RequestContext _ dbStructure apiRequest _) =
   case (ApiRequest.iAction apiRequest, ApiRequest.iTarget apiRequest) of
@@ -262,7 +248,7 @@ handleRead headersOnly identifier context@(RequestContext conf dbStructure apiRe
       liftEither . mapLeft Error.errorResponseFor $ gucResponse <$> gucHeaders <*> gucStatus
 
     let
-      (rangeStatus, contentRange) =
+      (status, contentRange) =
         RangeQuery.rangeStatusHeader
           (ApiRequest.iTopLevelRange apiRequest)
           queryTotal
@@ -285,7 +271,7 @@ handleRead headersOnly identifier context@(RequestContext conf dbStructure apiRe
         ] ++ maybeToList (profileHeader apiRequest)
 
     failNotSingular contentType queryTotal $
-        respond rangeStatus headers $ if headersOnly then mempty else toS body
+      respond status headers $ if headersOnly then mempty else toS body
 
 
 readTotal
@@ -594,6 +580,16 @@ txMode apiRequest =
       Hasql.Write
 
 
+data CreateResult =
+  CreateResult
+    { rQueryTotal :: Int64
+    , rFields :: [ByteString]
+    , rBody :: ByteString
+    , rGucHeaders :: [Types.GucHeader]
+    , rGucStatus :: Maybe HTTP.Status
+    }
+
+
 writeQuery
   :: QualifiedIdentifier
   -> Bool
@@ -753,6 +749,12 @@ rawContentTypes conf =
 profileHeader :: ApiRequest -> Maybe HTTP.Header
 profileHeader apiRequest =
   (,) <$> pure "Content-Profile" <*> (toS <$> ApiRequest.iProfile apiRequest)
+
+
+contentTypeError :: ApiRequest -> Wai.Response
+contentTypeError apiRequest =
+  Error.errorResponseFor . Error.ContentTypeError $
+    map Types.toMime (ApiRequest.iAccepts apiRequest)
 
 
 
