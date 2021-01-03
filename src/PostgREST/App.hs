@@ -65,8 +65,8 @@ data CreateResult =
     { rQueryTotal :: Int64
     , rFields :: [ByteString]
     , rBody :: ByteString
-    , rGucHeaders :: Either Error.SimpleError [Types.GucHeader]
-    , rGucStatus :: Either Error.SimpleError (Maybe HTTP.Status)
+    , rGucHeaders :: [Types.GucHeader]
+    , rGucStatus :: Maybe HTTP.Status
     }
 
 
@@ -118,6 +118,7 @@ postgrest logLev refConf refDbStructure pool getTime connWorker =
 
 errorToResponse :: Error -> Wai.Response
 errorToResponse =
+  -- TODO: Replace with Error.errorResponseFor or similar once Error is refactored
   identity
 
 
@@ -147,7 +148,7 @@ postgrestResponse conf maybeDbStructure pool time req =
             req
             body
 
-      -- The jwt must be checked before touching the db.
+      -- The JWT must be checked before touching the db.
       rawClaims <-
         lift $ Auth.jwtClaims <$>
           Auth.attemptJwtClaims
@@ -346,31 +347,6 @@ readTotal conf apiRequest tableTotal countQuery =
       return tableTotal
 
 
-writeStatement
-  :: QualifiedIdentifier
-  -> Bool
-  -> [Text]
-  -> RequestContext
-  -> DbHandler CreateResult
-writeStatement identifier isInsert pkCols context =
-  do
-    sq <- readQuery identifier context
-    mq <- mutateQuery identifier context
-
-    (_, queryTotal, fields, body, gucHeaders, gucStatus) <-
-      lift . Hasql.statement mempty $
-        Statements.createWriteStatement sq mq
-          (rContentType context == Types.CTSingularJSON)
-          isInsert
-          (rContentType context == Types.CTTextCSV)
-          (ApiRequest.iPreferRepresentation $ rApiRequest context)
-          pkCols
-          (Types.pgVersion $ rDbStructure context)
-          (Config.configDbPreparedStatements $ rConfig context)
-
-    return $ CreateResult queryTotal fields body gucHeaders gucStatus
-
-
 handleCreate :: QualifiedIdentifier -> RequestContext -> DbHandler Wai.Response
 handleCreate identifier context@(RequestContext _ dbStructure apiRequest contentType) =
   let
@@ -405,17 +381,14 @@ handleCreate identifier context@(RequestContext _ dbStructure apiRequest content
                 ApiRequest.iPreferResolution apiRequest
           ]
 
-      resp =
+      response =
         if ApiRequest.iPreferRepresentation apiRequest == Types.Full then
           gucResponse HTTP.status201 (headers ++ ctHeaders) (toS $ rBody result)
         else
           gucResponse HTTP.status201 headers mempty
 
-    response <-
-      liftEither . mapLeft Error.errorResponseFor $
-        resp <$> rGucHeaders result <*> rGucStatus result
-
-    failNotSingular contentType (rQueryTotal result) response
+    failNotSingular contentType (rQueryTotal result) $
+      response (rGucHeaders result) (rGucStatus result)
 
 
 handleUpdate :: QualifiedIdentifier -> RequestContext -> DbHandler Wai.Response
@@ -453,11 +426,8 @@ handleUpdate identifier context@(RequestContext _ _ apiRequest contentType) =
       headers =
         (if fullRepr then ctHeaders else []) ++ [contentRangeHeader]
 
-    response <-
-      liftEither $ mapLeft Error.errorResponseFor $
-        gucResponse defStatus headers fBody <$> rGucHeaders result <*> rGucStatus result
-
-    failNotSingular contentType (rQueryTotal result) response
+    failNotSingular contentType (rQueryTotal result) $
+      gucResponse defStatus headers fBody (rGucHeaders result) (rGucStatus result)
 
 
 handleSingleUpsert :: QualifiedIdentifier -> RequestContext-> DbHandler Wai.Response
@@ -488,8 +458,7 @@ handleSingleUpsert identifier context@(RequestContext _ _ apiRequest contentType
           lift Hasql.condemn
           throwError $ Error.errorResponseFor Error.PutMatchingPkError
       else
-        liftEither . mapLeft Error.errorResponseFor $
-          response <$> rGucHeaders result <*> rGucStatus result
+        return $ response (rGucHeaders result) (rGucStatus result)
 
 
 handleDelete :: QualifiedIdentifier -> RequestContext -> DbHandler Wai.Response
@@ -511,11 +480,8 @@ handleDelete identifier context@(RequestContext _ _ apiRequest contentType) =
         else
           gucResponse HTTP.status204 [contentRangeHeader] mempty
 
-    resp <-
-      liftEither . mapLeft Error.errorResponseFor $
-        response <$> rGucHeaders result <*> rGucStatus result
-
-    failNotSingular contentType (rQueryTotal result) resp
+    failNotSingular contentType (rQueryTotal result) $
+      response (rGucHeaders result) (rGucStatus result)
 
 
 handleInfo :: Monad m => QualifiedIdentifier -> DbStructure -> Handler m Wai.Response
@@ -632,6 +598,48 @@ handleOpenApi headersOnly tSchema (RequestContext conf dbStructure apiRequest _)
 -- HELPERS
 
 
+writeStatement
+  :: QualifiedIdentifier
+  -> Bool
+  -> [Text]
+  -> RequestContext
+  -> DbHandler CreateResult
+writeStatement identifier isInsert pkCols context =
+  do
+    readReq <-
+      liftEither $ readRequest
+        (rConfig context) (rDbStructure context) identifier (rApiRequest context)
+
+    mutateRequest <-
+      liftEither $
+        DbRequestBuilder.mutateRequest
+          (Types.qiSchema identifier)
+          (Types.qiName identifier)
+          (rApiRequest context)
+          (Types.tablePKCols
+            (rDbStructure context)
+            (Types.qiSchema identifier)
+            (Types.qiName identifier)
+          )
+          readReq
+
+    (_, queryTotal, fields, body, gucHeaders, gucStatus) <-
+      lift . Hasql.statement mempty $
+        Statements.createWriteStatement
+          (QueryBuilder.readRequestToQuery readReq)
+          (QueryBuilder.mutateRequestToQuery mutateRequest)
+          (rContentType context == Types.CTSingularJSON)
+          isInsert
+          (rContentType context == Types.CTTextCSV)
+          (ApiRequest.iPreferRepresentation $ rApiRequest context)
+          pkCols
+          (Types.pgVersion $ rDbStructure context)
+          (Config.configDbPreparedStatements $ rConfig context)
+
+    liftEither . mapLeft Error.errorResponseFor $
+      CreateResult queryTotal fields body <$> gucHeaders <*> gucStatus
+
+
 -- | Response with overrides from GUCs.
 gucResponse
   :: HTTP.Status
@@ -695,27 +703,6 @@ readRequest conf dbStructure identifier =
     (Types.qiName identifier)
     (Config.configDbMaxRows conf)
     (Types.dbRelations dbStructure)
-
-
-readQuery :: Monad m => QualifiedIdentifier -> RequestContext -> Handler m Hasql.Snippet
-readQuery identifier (RequestContext conf dbStructure apiRequest _) =
-  liftEither $
-    QueryBuilder.readRequestToQuery <$>
-      readRequest conf dbStructure identifier apiRequest
-
-
-mutateQuery :: Monad m => QualifiedIdentifier -> RequestContext -> Handler m Hasql.Snippet
-mutateQuery identifier (RequestContext conf dbStructure apiRequest _) =
-  liftEither $
-    QueryBuilder.mutateRequestToQuery <$>
-      (DbRequestBuilder.mutateRequest
-        (Types.qiSchema identifier)
-        (Types.qiName identifier)
-        apiRequest
-        (Types.tablePKCols dbStructure (Types.qiSchema identifier) (Types.qiName identifier))
-        =<< readRequest conf dbStructure identifier apiRequest
-      )
-
 
 
 -- CONTENT TYPES
