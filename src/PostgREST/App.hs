@@ -18,7 +18,7 @@ import Data.IORef              (IORef, readIORef)
 import Data.List               (union)
 import Data.Time.Clock         (UTCTime)
 
-import qualified Data.ByteString.Char8           as BS
+import qualified Data.ByteString.Char8           as BS8
 import qualified Data.ByteString.Lazy            as LazyBS
 import qualified Data.Set                        as Set
 import qualified Hasql.DynamicStatements.Snippet as SQL
@@ -232,7 +232,7 @@ handleRead headersOnly identifier context@(RequestContext conf dbStructure apiRe
         , ( "Content-Location"
           , "/"
               <> toS (Types.qiName identifier)
-              <> if BS.null qString then
+              <> if BS8.null qString then
                    mempty
                  else
                    "?" <> toS qString
@@ -297,7 +297,7 @@ handleCreate identifier context@(RequestContext _ dbStructure apiRequest content
           , if null pkCols && isNothing (Req.iOnConflict apiRequest) then
               Nothing
             else
-              (\x -> ("Preference-Applied", BS.pack (show x))) <$>
+              (\x -> ("Preference-Applied", BS8.pack (show x))) <$>
                 Req.iPreferResolution apiRequest
           ]
 
@@ -668,6 +668,6 @@ profileHeader apiRequest =
 
 splitKeyValue :: ByteString -> (ByteString, ByteString)
 splitKeyValue kv =
-  (k, BS.tail v)
+  (k, BS8.tail v)
   where
-    (k, v) = BS.break (== '=') kv
+    (k, v) = BS8.break (== '=') kv

@@ -3,7 +3,7 @@ Module      : PostgREST.Error
 Description : PostgREST error HTTP responses
 -}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module PostgREST.Error (
   errorResponseFor

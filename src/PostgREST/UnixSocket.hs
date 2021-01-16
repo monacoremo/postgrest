@@ -1,4 +1,4 @@
-module UnixSocket (
+module PostgREST.UnixSocket (
   runAppInSocket
 )where
 

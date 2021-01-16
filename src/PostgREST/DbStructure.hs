@@ -8,7 +8,7 @@ The schema cache is necessary for resource embedding, foreign keys are used for 
 
 These queries are executed once at startup or when PostgREST is reloaded.
 -}
-{-# LANGUAGE RecordWildCards       #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module PostgREST.DbStructure (
   getDbStructure
