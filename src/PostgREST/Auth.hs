@@ -3,8 +3,6 @@ Module      : PostgREST.Auth
 Description : PostgREST authorization functions.
 
 This module provides functions to deal with the JWT authorization (http://jwt.io).
-It also can be used to define other authorization functions,
-in the future Oauth, LDAP and similar integrations can be coded here.
 
 Authentication should always be implemented in an external service.
 In the test suite there is an example of simple login function that can be used for a
@@ -21,8 +19,6 @@ import Control.Lens            (set)
 import Control.Monad.Except    (liftEither)
 import Data.Either.Combinators (mapLeft)
 import Data.Time.Clock         (UTCTime)
-
-import Crypto.JWT (JWTError (..))
 
 import PostgREST.Error (Error (..))
 import PostgREST.Types (JSPath, JSPathExp (..))
@@ -48,14 +44,15 @@ jwtClaims conf payload time =
     liftEither . mapLeft jwtClaimsError $ claimsMap jspath <$> eitherClaims
   where
     validation =
-      set JWT.allowedSkew 1 $ JWT.defaultJWTValidationSettings audienceCheck
+      JWT.defaultJWTValidationSettings audienceCheck
+        & set JWT.allowedSkew 1
 
     audienceCheck :: JWT.StringOrURI -> Bool
     audienceCheck = maybe (const True) (==) (Config.configJwtAudience conf)
 
-    jwtClaimsError :: JWTError -> Error
-    jwtClaimsError JWTExpired = JwtTokenInvalid "JWT expired"
-    jwtClaimsError e          = JwtTokenInvalid $ show e
+    jwtClaimsError :: JWT.JWTError -> Error
+    jwtClaimsError JWT.JWTExpired = JwtTokenInvalid "JWT expired"
+    jwtClaimsError e              = JwtTokenInvalid $ show e
 
     jspath = Config.configJwtRoleClaimKey conf
 
@@ -65,15 +62,12 @@ jwtClaims conf payload time =
 claimsMap :: JSPath -> JWT.ClaimsSet -> JWTClaims
 claimsMap jspath claims =
   case JSON.toJSON claims of
-    val@(JSON.Object o) ->
-      let
-        role =
-          maybe M.empty (M.singleton "role") $ walkJSPath (Just val) jspath
-      in
-      M.delete "role" o `M.union` role -- mutating the map
-
-    _ -> M.empty
+    val@(JSON.Object o) -> M.delete "role" o `M.union` (role val)
+    _                   -> M.empty
   where
+    role val =
+      maybe M.empty (M.singleton "role") $ walkJSPath (Just val) jspath
+
     walkJSPath :: Maybe JSON.Value -> JSPath -> Maybe JSON.Value
     walkJSPath x                      []                = x
     walkJSPath (Just (JSON.Object o)) (JSPKey key:rest) = walkJSPath (M.lookup key o) rest
