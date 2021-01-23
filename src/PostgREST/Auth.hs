@@ -62,7 +62,7 @@ jwtClaims conf payload time =
 claimsMap :: JSPath -> JWT.ClaimsSet -> JWTClaims
 claimsMap jspath claims =
   case JSON.toJSON claims of
-    val@(JSON.Object o) -> M.delete "role" o `M.union` (role val)
+    val@(JSON.Object o) -> M.delete "role" o `M.union` role val
     _                   -> M.empty
   where
     role val =

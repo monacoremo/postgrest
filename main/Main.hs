@@ -3,7 +3,7 @@ module Main (main) where
 
 import qualified PostgREST.CLI as CLI
 #ifndef mingw32_HOST_OS
-import PostgREST.Signals (installHandlers)
+import PostgREST.Signals    (installHandlers)
 import PostgREST.UnixSocket (runWithSocket)
 #endif
 
