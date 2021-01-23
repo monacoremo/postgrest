@@ -1,6 +1,4 @@
-module PostgREST.UnixSocket (
-  runAppInSocket
-)where
+module PostgREST.UnixSocket (runWithSocket) where
 
 import Network.Socket           (Family (AF_UNIX),
                                  SockAddr (SockAddrUnix), Socket,
@@ -30,8 +28,8 @@ createAndBindSocket socketFilePath socketFileMode = do
       | otherwise = throwIO e
 
 -- run the postgrest application with user defined socket.
-runAppInSocket :: Settings -> Application -> FileMode -> FilePath -> IO ()
-runAppInSocket settings app socketFileMode sockPath = do
+runWithSocket :: Settings -> Application -> FileMode -> FilePath -> IO ()
+runWithSocket settings app socketFileMode sockPath = do
   sock <- createAndBindSocket sockPath socketFileMode
   putStrLn $ ("Listening on unix socket " :: Text) <> show sockPath
   listen sock maxListenQueue

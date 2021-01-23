@@ -3,8 +3,8 @@ module Main (main) where
 
 import qualified PostgREST.CLI as CLI
 #ifndef mingw32_HOST_OS
-import qualified PostgREST.Signals    as Signals
-import qualified PostgREST.UnixSocket as UnixSocket
+import PostgREST.Signals (installHandlers)
+import PostgREST.UnixSocket (runWithSocket)
 #endif
 
 import Protolude
@@ -14,7 +14,5 @@ main =
 #ifdef mingw32_HOST_OS
   CLI.app Nothing Nothing
 #else
-  CLI.app
-    (Just Signals.installHandlers)
-    (Just UnixSocket.runAppInSocket)
+  CLI.app (Just installHandlers) (Just runWithSocket)
 #endif
