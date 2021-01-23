@@ -61,20 +61,16 @@ import System.IO.Error         (IOError)
 import System.Posix.Types      (FileMode)
 import Text.Heredoc            (str)
 
-import Control.Applicative
-import Data.Monoid
-
 import Paths_postgrest (version)
 
 import PostgREST.Parsers          (pRoleClaimKey)
 import PostgREST.Private.ProxyUri (isMalformedProxyUri)
 import PostgREST.Types            (JSPath, JSPathExp (..),
                                    LogLevel (..))
-import Protolude                  hiding (concat, filter, hPutStrLn,
-                                   intercalate, null, replace, take,
-                                   toList, toLower, toS, toTitle,
-                                   (<>))
-import Protolude.Conv             (toS)
+
+import Protolude      hiding (filter, intercalate, replace, take,
+                       toList, toLower, toS, toTitle)
+import Protolude.Conv (toS)
 
 -- | Config file settings for the server
 data AppConfig = AppConfig {
