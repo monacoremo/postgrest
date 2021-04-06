@@ -78,7 +78,7 @@ mutateRequestToQuery (Insert mainQi iCols body onConflct putConditions returning
   -- Only used for PUT
   ("WHERE " <> intercalateSnippet " AND " (pgFmtLogicTree (QualifiedIdentifier mempty "_") <$> putConditions)) `emptySnippetOnFalse` null putConditions <>
   H.sql (BS.unwords [
-    maybe "" (\(oncDo, oncCols) -> (
+    maybe "" (\(oncDo, oncCols) -> if null oncCols then mempty else
       "ON CONFLICT(" <> BS.intercalate ", " (pgFmtIdent <$> oncCols) <> ") " <> case oncDo of
       IgnoreDuplicates ->
         "DO NOTHING"
@@ -86,7 +86,7 @@ mutateRequestToQuery (Insert mainQi iCols body onConflct putConditions returning
         if S.null iCols
            then "DO NOTHING"
            else "DO UPDATE SET " <> BS.intercalate ", " (pgFmtIdent <> const " = EXCLUDED." <> pgFmtIdent <$> S.toList iCols)
-                                   ) `emptyOnFalse` null oncCols) onConflct,
+                                   ) onConflct,
     returningF mainQi returnings
     ])
   where
