@@ -1,18 +1,8 @@
-From 2aabdaca408d22ce2b6aa078ba58a115f5bd7fe4 Mon Sep 17 00:00:00 2001
-From: Remo <remo>
-Date: Fri, 15 May 2020 10:13:43 +0200
-Subject: [PATCH] openssl: split runtime dependencies of static builds into a
- separate output
-
----
- .../development/libraries/openssl/default.nix | 38 ++++++++++++++++---
- 1 file changed, 32 insertions(+), 6 deletions(-)
-
 diff --git a/pkgs/development/libraries/openssl/default.nix b/pkgs/development/libraries/openssl/default.nix
-index 43170f25d38..6336a060911 100644
+index fda0c71655a..ed6d935bc3d 100644
 --- a/pkgs/development/libraries/openssl/default.nix
 +++ b/pkgs/development/libraries/openssl/default.nix
-@@ -34,9 +34,22 @@ let
+@@ -48,9 +48,22 @@ let
        substituteInPlace crypto/async/arch/async_posix.h \
          --replace '!defined(__ANDROID__) && !defined(__OpenBSD__)' \
                    '!defined(__ANDROID__) && !defined(__OpenBSD__) && 0'
@@ -36,7 +26,7 @@ index 43170f25d38..6336a060911 100644
      setOutputFlags = false;
      separateDebugInfo = !(stdenv.hostPlatform.useLLVM or false) && stdenv.cc.isGNU;
  
-@@ -72,7 +85,17 @@ let
+@@ -89,7 +102,17 @@ let
      configureFlags = [
        "shared" # "shared" builds both shared and static libraries
        "--libdir=lib"
@@ -52,19 +42,31 @@ index 43170f25d38..6336a060911 100644
 +         # prepended to it otherwise.
 +         "--openssldir=/.$(etc)/etc/ssl"
 +      )
-     ] ++ stdenv.lib.optionals withCryptodev [
+     ] ++ lib.optionals withCryptodev [
        "-DHAVE_CRYPTODEV"
        "-DUSE_CRYPTODEV_DIGESTS"
-@@ -103,6 +126,8 @@ let
+@@ -120,6 +143,10 @@ let
            rm "$out/lib/"*.a
        fi
  
 +      # 'etc' is a separate output on static builds only.
 +      etc=$out
++    '' +
++    ''
+       mkdir -p $bin
+     '' + lib.optionalString (!stdenv.hostPlatform.isWindows)
+       # Fix bin/c_rehash's perl interpreter line
+@@ -134,6 +161,9 @@ let
+       # "#!/usr/bin/env perl"
+     ''
+       substituteInPlace $out/bin/c_rehash --replace ${buildPackages.perl}/bin/perl "/usr/bin/env perl"
++    '' + lib.optionalString (!static)
++    ''
++      openssldir=$out
      '' +
      ''
-       mkdir -p $bin
-@@ -117,14 +142,15 @@ let
+       mv $out/bin $bin/
+@@ -142,14 +172,15 @@ let
        mv $out/include $dev/
  
        # remove dependency on Perl at runtime
@@ -75,7 +77,7 @@ index 43170f25d38..6336a060911 100644
 +      rmdir $etc/etc/ssl/{certs,private}
      '';
  
-     postFixup = stdenv.lib.optionalString (!stdenv.hostPlatform.isWindows) ''
+     postFixup = lib.optionalString (!stdenv.hostPlatform.isWindows) ''
 -      # Check to make sure the main output doesn't depend on perl
 -      if grep -r '${buildPackages.perl}' $out; then
 +      # Check to make sure the main output and the static runtime dependencies
@@ -84,6 +86,3 @@ index 43170f25d38..6336a060911 100644
          echo "Found an erroneous dependency on perl ^^^" >&2
          exit 1
        fi
--- 
-2.25.1
-
