@@ -38,11 +38,11 @@ library
                       PostgREST.ApiRequest.Preferences
                       PostgREST.App
                       PostgREST.Auth
+                      PostgREST.CLI
                       PostgREST.Config
                       PostgREST.Config.JSPath
                       PostgREST.Config.Proxy
                       PostgREST.ContentType
-                      PostgREST.DbRequestBuilder
                       PostgREST.DbStructure
                       PostgREST.DbStructure.Identifiers
                       PostgREST.DbStructure.Proc
@@ -54,11 +54,13 @@ library
                       PostgREST.OpenAPI
                       PostgREST.Parsers
                       PostgREST.PgVersions
-                      PostgREST.Queries
-                      PostgREST.QueryBuilder
+                      PostgREST.Query
+                      PostgREST.Query.Builder
+                      PostgREST.Query.DbRequestBuilder
+                      PostgREST.Query.SqlFragment
+                      PostgREST.Query.Statements
+                      PostgREST.Query.Types
                       PostgREST.RangeQuery
-                      PostgREST.Statements
-                      PostgREST.SqlFragment
   other-modules:      Paths_postgrest
   build-depends:      base                      >= 4.9 && < 4.15
                     , HTTP                      >= 4000.3.7 && < 4000.4

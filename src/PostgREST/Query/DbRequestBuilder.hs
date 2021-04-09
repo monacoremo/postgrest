@@ -15,7 +15,7 @@ resource.
 {-# LANGUAGE NamedFieldPuns        #-}
 {-# LANGUAGE RecordWildCards       #-}
 
-module PostgREST.DbRequestBuilder
+module PostgREST.Query.DbRequestBuilder
   ( readRequest
   , mutateRequest
   , returningCols
@@ -42,13 +42,13 @@ import PostgREST.DbStructure.Table       (Column (..), Table (..),
                                           tableQi)
 import PostgREST.Error                   (ApiRequestError (..),
                                           Error (..))
+import PostgREST.Query.SqlFragment       (sourceCTEName)
 import PostgREST.RangeQuery              (NonnegRange, allRange,
                                           restrictRange)
-import PostgREST.SqlFragment             (sourceCTEName)
 
 import PostgREST.ApiRequest.Preferences
 import PostgREST.Parsers
-import PostgREST.Queries
+import PostgREST.Query.Types
 
 import qualified PostgREST.DbStructure.Relation as Relation
 

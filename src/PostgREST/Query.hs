@@ -5,11 +5,11 @@ import Control.Monad.Except (liftEither)
 
 import qualified Hasql.Statement as SQL
 
-import qualified PostgREST.ApiRequest       as ApiRequest
-import qualified PostgREST.DbRequestBuilder as ReqBuilder
-import qualified PostgREST.Error            as Error
-import qualified PostgREST.QueryBuilder     as QueryBuilder
-import qualified PostgREST.Statements       as Statements
+import qualified PostgREST.ApiRequest             as ApiRequest
+import qualified PostgREST.Error                  as Error
+import qualified PostgREST.Query.Builder          as QueryBuilder
+import qualified PostgREST.Query.DbRequestBuilder as ReqBuilder
+import qualified PostgREST.Query.Statements       as Statements
 
 import PostgREST.ApiRequest              (ApiRequest (..),
                                           Target (..))
@@ -25,7 +25,7 @@ import PostgREST.DbStructure.Identifiers (FieldName,
                                           QualifiedIdentifier (..))
 import PostgREST.DbStructure.Proc        (ProcDescription (..))
 import PostgREST.Error                   (Error)
-import PostgREST.Queries                 (ReadRequest, fstFieldNames)
+import PostgREST.Query.Types             (ReadRequest, fstFieldNames)
 
 import qualified PostgREST.DbStructure.Proc as Proc
 

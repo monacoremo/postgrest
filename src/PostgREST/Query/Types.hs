@@ -1,5 +1,5 @@
 {-# LANGUAGE DuplicateRecordFields #-}
-module PostgREST.Queries
+module PostgREST.Query.Types
   ( Alias
   , Depth
   , EmbedHint

@@ -6,7 +6,7 @@ Description : Helper functions for PostgREST.QueryBuilder.
 
 Any function that outputs a SqlFragment should be in this module.
 -}
-module PostgREST.SqlFragment
+module PostgREST.Query.SqlFragment
   ( noLocationF
   , SqlFragment
   , asBinaryF
@@ -49,7 +49,7 @@ import Text.InterpolatedString.Perl6 (qc)
 import PostgREST.DbStructure.Identifiers (FieldName,
                                           QualifiedIdentifier (..))
 import PostgREST.PgVersions              (PgVersion, pgVersion96)
-import PostgREST.Queries                 (Alias, Field, Filter (..),
+import PostgREST.Query.Types             (Alias, Field, Filter (..),
                                           JoinCondition (..),
                                           JsonOperand (..),
                                           JsonOperation (..),

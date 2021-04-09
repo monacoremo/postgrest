@@ -39,11 +39,12 @@ import Network.HTTP.Types.Status (Status, status400, status500,
 import System.IO.Unsafe          (unsafePerformIO)
 import System.Log.FastLogger     (toLogStr)
 
-import PostgREST.ApiRequest  (ApiRequest (..))
-import PostgREST.Config      (AppConfig (..), LogLevel (..))
-import PostgREST.Error       (Error, errorResponseFor)
-import PostgREST.Headers     (addHeadersIfNotIncluded)
-import PostgREST.SqlFragment (intercalateSnippet, unknownLiteral)
+import PostgREST.ApiRequest        (ApiRequest (..))
+import PostgREST.Config            (AppConfig (..), LogLevel (..))
+import PostgREST.Error             (Error, errorResponseFor)
+import PostgREST.Headers           (addHeadersIfNotIncluded)
+import PostgREST.Query.SqlFragment (intercalateSnippet,
+                                    unknownLiteral)
 
 import PostgREST.ApiRequest.Preferences
 

@@ -42,10 +42,10 @@ import Text.ParserCombinators.Parsec (GenParser, ParseError, Parser,
 
 import PostgREST.DbStructure.Identifiers (FieldName)
 import PostgREST.Error                   (ApiRequestError (ParseRequestError))
+import PostgREST.Query.SqlFragment       (ftsOperators, operators)
 import PostgREST.RangeQuery              (NonnegRange)
-import PostgREST.SqlFragment             (ftsOperators, operators)
 
-import PostgREST.Queries
+import PostgREST.Query.Types
 
 
 import Protolude      hiding (intercalate, option, replace, toS, try)

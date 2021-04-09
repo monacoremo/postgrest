@@ -59,11 +59,11 @@ import PostgREST.DbStructure.Proc        (PgArg (..),
                                           findProc)
 import PostgREST.Error                   (ApiRequestError (..))
 import PostgREST.Parsers                 (pRequestColumns)
+import PostgREST.Query.SqlFragment       (ftsOperators, operators)
 import PostgREST.RangeQuery              (NonnegRange, allRange,
                                           rangeGeq, rangeLimit,
                                           rangeOffset, rangeRequested,
                                           restrictRange)
-import PostgREST.SqlFragment             (ftsOperators, operators)
 
 import qualified PostgREST.ContentType as ContentType
 
