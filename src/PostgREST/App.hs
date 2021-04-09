@@ -18,17 +18,17 @@ import Data.IORef              (IORef, readIORef)
 import Data.List               (union)
 import Data.Time.Clock         (UTCTime)
 
-import qualified Data.ByteString.Char8           as BS8
-import qualified Data.ByteString.Lazy            as LBS
-import qualified Data.Set                        as Set
-import qualified Hasql.DynamicStatements.Snippet as SQL
-import qualified Hasql.Pool                      as SQL
-import qualified Hasql.Transaction               as SQL
-import qualified Hasql.Transaction.Sessions      as SQL
-import qualified Network.HTTP.Types.Header       as HTTP
-import qualified Network.HTTP.Types.Status       as HTTP
-import qualified Network.HTTP.Types.URI          as HTTP
-import qualified Network.Wai                     as Wai
+import qualified Data.ByteString.Char8      as BS8
+import qualified Data.ByteString.Lazy       as LBS
+import qualified Data.Set                   as Set
+import qualified Hasql.Pool                 as SQL
+import qualified Hasql.Statement            as SQL
+import qualified Hasql.Transaction          as SQL
+import qualified Hasql.Transaction.Sessions as SQL
+import qualified Network.HTTP.Types.Header  as HTTP
+import qualified Network.HTTP.Types.Status  as HTTP
+import qualified Network.HTTP.Types.URI     as HTTP
+import qualified Network.Wai                as Wai
 
 import qualified PostgREST.ApiRequest       as ApiRequest
 import qualified PostgREST.Auth             as Auth
@@ -188,35 +188,22 @@ handleRequest context@(RequestContext _ _ ApiRequest{..} _) =
 
 handleRead :: Bool -> QualifiedIdentifier -> RequestContext -> DbHandler Wai.Response
 handleRead headersOnly identifier context@RequestContext{..} = do
-  req <- readRequest identifier context
-  bField <- binaryField context req
+  statement <-
+    readStatement ctxConfig ctxDbStructure ctxApiRequest ctxContentType identifier
+
+  (tableTotal, queryTotal, _ , body, gucHeaders, gucStatus) <-
+    lift $ SQL.statement mempty statement
+
+  explain <-
+    explainStatement ctxConfig ctxDbStructure ctxApiRequest identifier
+
+  total <- readTotal ctxConfig ctxApiRequest tableTotal explain
+  response <- liftEither $ gucResponse <$> gucStatus <*> gucHeaders
 
   let
     ApiRequest{..} = ctxApiRequest
     AppConfig{..} = ctxConfig
-    countQuery = QueryBuilder.readRequestToCountQuery req
 
-  (tableTotal, queryTotal, _ , body, gucHeaders, gucStatus) <-
-    lift . SQL.statement mempty $
-      Statements.createReadStatement
-        (QueryBuilder.readRequestToQuery req)
-        (if iPreferCount == Just EstimatedCount then
-           -- LIMIT maxRows + 1 so we can determine below that maxRows was surpassed
-           QueryBuilder.limitedQuery countQuery ((+ 1) <$> configDbMaxRows)
-         else
-           countQuery
-        )
-        (ctxContentType == CTSingularJSON)
-        (shouldCount iPreferCount)
-        (ctxContentType == CTTextCSV)
-        bField
-        (pgVersion ctxDbStructure)
-        configDbPreparedStatements
-
-  total <- readTotal ctxConfig ctxApiRequest tableTotal countQuery
-  response <- liftEither $ gucResponse <$> gucStatus <*> gucHeaders
-
-  let
     (status, contentRange) = RangeQuery.rangeStatusHeader iTopLevelRange queryTotal total
     headers =
       [ contentRange
@@ -231,22 +218,48 @@ handleRead headersOnly identifier context@RequestContext{..} = do
   failNotSingular ctxContentType queryTotal . response status headers $
     if headersOnly then mempty else toS body
 
-readTotal :: AppConfig -> ApiRequest -> Maybe Int64 -> SQL.Snippet -> DbHandler (Maybe Int64)
-readTotal AppConfig{..} ApiRequest{..} tableTotal countQuery =
+readStatement :: Monad m => AppConfig -> DbStructure -> ApiRequest -> ContentType -> QualifiedIdentifier -> Handler m (SQL.Statement () Statements.ResultsWithCount)
+readStatement config@AppConfig{..} dbStructure apiRequest@ApiRequest{..} contentType identifier = do
+  req <- readRequest config dbStructure apiRequest identifier
+  bField <- binaryField config apiRequest contentType req
+  let countQuery = QueryBuilder.readRequestToCountQuery req
+  return $ Statements.createReadStatement
+    (QueryBuilder.readRequestToQuery req)
+    (if iPreferCount == Just EstimatedCount then
+       -- LIMIT maxRows + 1 so we can determine below that maxRows was surpassed
+       QueryBuilder.limitedQuery countQuery ((+ 1) <$> configDbMaxRows)
+     else
+       countQuery
+    )
+    (contentType == CTSingularJSON)
+    (shouldCount iPreferCount)
+    (contentType == CTTextCSV)
+    bField
+    (pgVersion dbStructure)
+    configDbPreparedStatements
+
+readTotal :: AppConfig -> ApiRequest -> Maybe Int64 -> SQL.Statement () (Maybe Int64) -> DbHandler (Maybe Int64)
+readTotal AppConfig{..} ApiRequest{..} tableTotal explain =
   case iPreferCount of
     Just PlannedCount ->
-      explain
+      explainQuery
     Just EstimatedCount ->
       if tableTotal > (fromIntegral <$> configDbMaxRows) then
-        max tableTotal <$> explain
+        max tableTotal <$> explainQuery
       else
         return tableTotal
     _ ->
       return tableTotal
   where
-    explain =
-      lift . SQL.statement mempty . Statements.createExplainStatement countQuery $
-        configDbPreparedStatements
+    explainQuery = lift $ SQL.statement mempty explain
+
+explainStatement :: Monad m => AppConfig -> DbStructure -> ApiRequest -> QualifiedIdentifier -> Handler m (SQL.Statement () (Maybe Int64))
+explainStatement ctxConfig ctxDbStructure ctxApiRequest identifier = do
+  req <- readRequest ctxConfig ctxDbStructure ctxApiRequest identifier
+  return $
+    Statements.createExplainStatement
+      (QueryBuilder.readRequestToCountQuery req)
+      (configDbPreparedStatements ctxConfig)
 
 handleCreate :: QualifiedIdentifier -> RequestContext -> DbHandler Wai.Response
 handleCreate identifier@QualifiedIdentifier{..} context@RequestContext{..} = do
@@ -377,8 +390,8 @@ handleInvoke invMethod proc context@RequestContext{..} = do
     returnsSingle (ApiRequest.TargetProc target _) = Proc.procReturnsSingle target
     returnsSingle _                                = False
 
-  req <- readRequest identifier context
-  bField <- binaryField context req
+  req <- readRequest ctxConfig ctxDbStructure ctxApiRequest identifier
+  bField <- binaryField ctxConfig ctxApiRequest ctxContentType req
 
   (tableTotal, queryTotal, body, gucHeaders, gucStatus) <-
     lift . SQL.statement mempty $
@@ -457,9 +470,9 @@ data WriteQueryResult = WriteQueryResult
   , resGucHeaders :: [GucHeader]
   }
 
-writeQuery :: QualifiedIdentifier -> Bool -> [Text] -> RequestContext -> DbHandler WriteQueryResult
-writeQuery identifier@QualifiedIdentifier{..} isInsert pkCols context@RequestContext{..} = do
-  readReq <- readRequest identifier context
+writeStatement :: Monad m => QualifiedIdentifier -> Bool -> [Text] -> RequestContext -> Handler m (SQL.Statement () Statements.ResultsWithCount)
+writeStatement identifier@QualifiedIdentifier{..} isInsert pkCols RequestContext{..} = do
+  readReq <- readRequest ctxConfig ctxDbStructure ctxApiRequest identifier
 
   mutateReq <-
     liftEither $
@@ -467,18 +480,23 @@ writeQuery identifier@QualifiedIdentifier{..} isInsert pkCols context@RequestCon
         (tablePKCols ctxDbStructure qiSchema qiName)
         readReq
 
+  return $ Statements.createWriteStatement
+    (QueryBuilder.readRequestToQuery readReq)
+    (QueryBuilder.mutateRequestToQuery mutateReq)
+    (ctxContentType == CTSingularJSON)
+    isInsert
+    (ctxContentType == CTTextCSV)
+    (iPreferRepresentation ctxApiRequest)
+    pkCols
+    (pgVersion ctxDbStructure)
+    (configDbPreparedStatements ctxConfig)
+
+writeQuery :: QualifiedIdentifier -> Bool -> [Text] -> RequestContext -> DbHandler WriteQueryResult
+writeQuery identifier@QualifiedIdentifier{..} isInsert pkCols context@RequestContext{..} = do
+  statement <- writeStatement identifier isInsert pkCols context
+
   (_, queryTotal, fields, body, gucHeaders, gucStatus) <-
-    lift . SQL.statement mempty $
-      Statements.createWriteStatement
-        (QueryBuilder.readRequestToQuery readReq)
-        (QueryBuilder.mutateRequestToQuery mutateReq)
-        (ctxContentType == CTSingularJSON)
-        isInsert
-        (ctxContentType == CTTextCSV)
-        (iPreferRepresentation ctxApiRequest)
-        pkCols
-        (pgVersion ctxDbStructure)
-        (configDbPreparedStatements ctxConfig)
+    lift $ SQL.statement mempty statement
 
   liftEither $ WriteQueryResult queryTotal fields body <$> gucStatus <*> gucHeaders
 
@@ -514,8 +532,8 @@ returnsScalar :: ApiRequest.Target -> Bool
 returnsScalar (TargetProc proc _) = Proc.procReturnsScalar proc
 returnsScalar _                   = False
 
-readRequest :: Monad m => QualifiedIdentifier -> RequestContext -> Handler m ReadRequest
-readRequest QualifiedIdentifier{..} (RequestContext AppConfig{..} dbStructure apiRequest _) =
+readRequest :: Monad m => AppConfig -> DbStructure -> ApiRequest -> QualifiedIdentifier -> Handler m ReadRequest
+readRequest AppConfig{..} dbStructure apiRequest QualifiedIdentifier{..} =
   liftEither $
     ReqBuilder.readRequest qiSchema qiName configDbMaxRows
       (dbRelations dbStructure)
@@ -544,8 +562,8 @@ requestContentTypes conf ApiRequest{..} =
 -- |
 -- If raw(binary) output is requested, check that ContentType is one of the admitted
 -- rawContentTypes and that`?select=...` contains only one field other than `*`
-binaryField :: Monad m => RequestContext -> ReadRequest -> Handler m (Maybe FieldName)
-binaryField RequestContext{..} readReq
+binaryField :: Monad m => AppConfig -> ApiRequest -> ContentType -> ReadRequest -> Handler m (Maybe FieldName)
+binaryField ctxConfig ctxApiRequest ctxContentType readReq
   | returnsScalar (iTarget ctxApiRequest) && ctxContentType `elem` rawContentTypes ctxConfig =
       return $ Just "pgrst_scalar"
   | ctxContentType `elem` rawContentTypes ctxConfig =
