@@ -31,13 +31,19 @@ import System.IO                (BufferMode (..), hSetBuffering)
 import Text.Printf              (hPrintf)
 
 import PostgREST.App         (postgrest)
-import PostgREST.Config
+import PostgREST.CLI         (CLI (..), Command (..), readCLIShowHelp)
+import PostgREST.Config      (AppConfig (..), Environment,
+                              configDbPoolTimeout', dumpAppConfig,
+                              prettyVersion, readAppConfig,
+                              readDbUriFile, readEnvironment,
+                              readSecretFile)
 import PostgREST.DbStructure (DbStructure, getDbStructure,
                               getPgVersion)
 import PostgREST.Error       (PgError (PgError), checkIsFatal,
                               errorPayload)
 import PostgREST.PgVersions  (PgVersion (..), minimumPgVersion)
 import PostgREST.Statements  (dbSettingsStatement)
+
 import Protolude             hiding (hPutStrLn, head, toS)
 import Protolude.Conv        (toS)
 
