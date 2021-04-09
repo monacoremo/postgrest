@@ -17,6 +17,7 @@ module PostgREST.Statements
   , createExplainStatement
   , dbSettingsStatement
   , ResultsWithCount
+  , ProcResults
   ) where
 
 import qualified Data.Aeson                        as JSON

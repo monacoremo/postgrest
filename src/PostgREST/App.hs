@@ -377,8 +377,8 @@ handleInfo identifier RequestContext{..} =
       tableName table == qiName identifier
       && tableSchema table == qiSchema identifier
 
-handleInvoke :: InvokeMethod -> ProcDescription -> RequestContext -> DbHandler Wai.Response
-handleInvoke invMethod proc context@RequestContext{..} = do
+callProcStatement :: Monad m => AppConfig -> DbStructure -> ApiRequest -> ContentType -> ProcDescription -> Handler m (SQL.Statement () Statements.ProcResults)
+callProcStatement ctxConfig ctxDbStructure ctxApiRequest ctxContentType proc = do
   let
     ApiRequest{..} = ctxApiRequest
 
@@ -393,9 +393,8 @@ handleInvoke invMethod proc context@RequestContext{..} = do
   req <- readRequest ctxConfig ctxDbStructure ctxApiRequest identifier
   bField <- binaryField ctxConfig ctxApiRequest ctxContentType req
 
-  (tableTotal, queryTotal, body, gucHeaders, gucStatus) <-
-    lift . SQL.statement mempty $
-      Statements.callProcStatement
+  return $
+    Statements.callProcStatement
         (returnsScalar iTarget)
         (returnsSingle iTarget)
         (QueryBuilder.requestToCallProcQuery
@@ -416,9 +415,18 @@ handleInvoke invMethod proc context@RequestContext{..} = do
         (pgVersion ctxDbStructure)
         (configDbPreparedStatements ctxConfig)
 
+handleInvoke :: InvokeMethod -> ProcDescription -> RequestContext -> DbHandler Wai.Response
+handleInvoke invMethod proc context@RequestContext{..} = do
+  statement <-
+    callProcStatement ctxConfig ctxDbStructure ctxApiRequest ctxContentType proc
+
+  (tableTotal, queryTotal, body, gucHeaders, gucStatus) <-
+    lift . SQL.statement mempty $ statement
+
   response <- liftEither $ gucResponse <$> gucStatus <*> gucHeaders
 
   let
+    ApiRequest{..} = ctxApiRequest
     (status, contentRange) =
       RangeQuery.rangeStatusHeader iTopLevelRange queryTotal tableTotal
 
