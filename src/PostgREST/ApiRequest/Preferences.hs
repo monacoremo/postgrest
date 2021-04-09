@@ -49,6 +49,10 @@ data PreferTransaction
   | Rollback -- Rollback transaction after sending the response - does not persist changes, e.g. for running tests.
   deriving Eq
 
+shouldCount :: Maybe PreferCount -> Bool
+shouldCount preferCount =
+  preferCount == Just ExactCount || preferCount == Just EstimatedCount
+
 instance Show PreferTransaction where
   show Commit   = "tx=commit"
   show Rollback = "tx=rollback"

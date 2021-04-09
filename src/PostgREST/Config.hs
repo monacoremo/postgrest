@@ -17,6 +17,7 @@ Other hardcoded options such as the minimum version number also belong here.
 {-# LANGUAGE LambdaCase            #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE QuasiQuotes           #-}
+{-# LANGUAGE RecordWildCards       #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
 {-# LANGUAGE TemplateHaskell       #-}
 {-# OPTIONS_GHC -fno-warn-type-defaults #-}
@@ -40,6 +41,7 @@ module PostgREST.Config
   , isMalformedProxyUri
   , toURI
   , example
+  , rawContentTypes
   ) where
 
 import qualified Crypto.JOSE.Types      as JOSE
@@ -59,7 +61,7 @@ import Control.Monad           (fail)
 import Crypto.JWT              (JWK, JWKSet, StringOrURI, stringOrUri)
 import Data.Aeson              (encode, toJSON)
 import Data.Either.Combinators (mapLeft)
-import Data.List               (lookup)
+import Data.List               (lookup, union)
 import Data.List.NonEmpty      (fromList, toList)
 import Data.Maybe              (fromJust)
 import Data.Scientific         (floatingOrInteger)
@@ -74,6 +76,7 @@ import Text.Heredoc            (str)
 import PostgREST.Config.JSPath (JSPath, JSPathExp (..), pRoleClaimKey)
 import PostgREST.Config.Proxy  (Proxy (..), isMalformedProxyUri,
                                 toURI)
+import PostgREST.ContentType   (ContentType (..), decodeContentType)
 
 import Protolude      hiding (Proxy, toList, toS)
 import Protolude.Conv (toS)
@@ -529,3 +532,7 @@ readEnvironment :: IO Environment
 readEnvironment = getEnvironment <&> pgrst
   where
     pgrst env = M.filterWithKey (\k _ -> "PGRST_" `isPrefixOf` k) $ M.map T.pack $ M.fromList env
+
+rawContentTypes :: AppConfig -> [ContentType]
+rawContentTypes AppConfig{..} =
+  (decodeContentType <$> configRawMediaTypes) `union` [CTOctetStream, CTTextPlain]
