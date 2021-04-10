@@ -35,12 +35,12 @@ import Data.Text.Read                (decimal)
 import Network.HTTP.Types.Status     (Status)
 import Text.InterpolatedString.Perl6 (q)
 
-import PostgREST.Error      (Error (..))
-import PostgREST.Headers    (GucHeader)
-import PostgREST.PgVersions (PgVersion)
+import PostgREST.DbStructure.Identifiers (FieldName)
+import PostgREST.DbStructure.PgVersion   (PgVersion)
+import PostgREST.Error                   (Error (..))
+import PostgREST.Headers                 (GucHeader)
 
 import PostgREST.ApiRequest.Preferences
-import PostgREST.DbStructure.Identifiers (FieldName)
 import PostgREST.Query.SqlFragment
 
 import Protolude      hiding (toS)

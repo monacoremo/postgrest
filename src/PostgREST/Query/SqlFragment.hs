@@ -48,7 +48,7 @@ import Text.InterpolatedString.Perl6 (qc)
 
 import PostgREST.DbStructure.Identifiers (FieldName,
                                           QualifiedIdentifier (..))
-import PostgREST.PgVersions              (PgVersion, pgVersion96)
+import PostgREST.DbStructure.PgVersion   (PgVersion, pgVersion96)
 import PostgREST.Query.Types             (Alias, Field, Filter (..),
                                           JoinCondition (..),
                                           JsonOperand (..),
