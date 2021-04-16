@@ -17,7 +17,7 @@ let
     patches.applyPatches "patched-static-haskell-nix"
       static-haskell-nix
       [
-        patches.static-haskell-nix-postgrest-openssl-linking-fix
+        #patches.static-haskell-nix-postgrest-openssl-linking-fix
         patches.static-haskell-nix-hasql-notifications-openssl-linking-fix
       ];
 
@@ -26,7 +26,7 @@ let
       nixpkgs
       [
         patches.nixpkgs-openssl-split-runtime-dependencies-of-static-builds
-        patches.nixpkgs-gdb-fix-libintl
+       # patches.nixpkgs-gdb-fix-libintl
       ];
 
   extraOverrides =
