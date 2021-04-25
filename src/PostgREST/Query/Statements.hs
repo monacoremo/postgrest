@@ -10,7 +10,9 @@ This module constructs single SQL statements that can be parametrized and prepar
 TODO: Currently, createReadStatement is not using prepared statements. See https://github.com/PostgREST/postgrest/issues/718.
 -}
 module PostgREST.Query.Statements
-  ( createWriteStatement
+  ( ResultsWithCount
+  , ProcResults
+  , createWriteStatement
   , createReadStatement
   , callProcStatement
   , createExplainStatement
