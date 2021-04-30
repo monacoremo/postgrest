@@ -116,10 +116,11 @@ postgrestResponse
   -> Wai.Request
   -> Handler IO Wai.Response
 postgrestResponse conf maybeDbStructure pgVer pool time req = do
+  -- Fail early if no DbStructure is loaded
+  dbStructure <- maybe (throwError Error.ConnectionLostError) pure maybeDbStructure
   -- The JWT must be checked before touching the db
   jwtClaims <- Auth.jwtClaims conf req time
   body <- lift $ Wai.strictRequestBody req
-  dbStructure <- maybe (throwError Error.ConnectionLostError) pure maybeDbStructure
   request <- liftEither $ Request.parse conf pgVer dbStructure req body
   runDbHandler pool (Query.txMode $ Request.apiReq request) jwtClaims .
     Middleware.optionalRollback conf (Request.apiReq request) $ do
