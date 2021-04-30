@@ -138,16 +138,16 @@ runDbHandler pool mode jwtClaims handler = do
 handleRequest :: Request -> DbHandler Wai.Response
 handleRequest req =
   case req of
-    ReadRequest requestInfo ->
-      Response.readResponse <$> Query.readQuery requestInfo
-    CreateRequest requestInfo ->
-      Response.createResponse <$> Query.createQuery requestInfo
-    UpdateRequest requestInfo ->
-      Response.updateResponse <$> Query.updateQuery requestInfo
-    SingleUpsertRequest requestInfo ->
-      Response.singleUpsertResponse <$> Query.singleUpsertQuery requestInfo
-    DeleteRequest requestInfo ->
-      Response.deleteResponse <$> Query.deleteQuery requestInfo
+    ReadRequest readRequestInfo ->
+      Response.readResponse <$> Query.readQuery readRequestInfo
+    CreateRequest mutateRequestInfo ->
+      Response.createResponse <$> Query.createQuery mutateRequestInfo
+    UpdateRequest mutateRequestInfo ->
+      Response.updateResponse <$> Query.updateQuery mutateRequestInfo
+    SingleUpsertRequest mutateRequestInfo ->
+      Response.singleUpsertResponse <$> Query.singleUpsertQuery mutateRequestInfo
+    DeleteRequest mutateRequestInfo ->
+      Response.deleteResponse <$> Query.deleteQuery mutateRequestInfo
     InfoRequest dbStructure _ QualifiedIdentifier{..} ->
       case find tableMatches $ dbTables dbStructure of
         Just table -> return $ Response.infoResponse hasPK table
@@ -155,8 +155,8 @@ handleRequest req =
       where
         tableMatches Table{..} = tableName == qiName && tableSchema == qiSchema
         hasPK = not $ null $ tablePKCols dbStructure qiSchema qiName
-    InvokeRequest requestInfo  ->
-      Response.invokeResponse <$> Query.invokeQuery requestInfo
+    InvokeRequest invokeRequestInfo  ->
+      Response.invokeResponse <$> Query.invokeQuery invokeRequestInfo
     OpenApiRequest conf dbStructure apiRequest headersOnly tSchema ->
       Response.openApiResponse headersOnly conf dbStructure apiRequest
         <$> Query.openApiQuery tSchema conf
