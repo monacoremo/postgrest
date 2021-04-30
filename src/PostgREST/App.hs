@@ -87,7 +87,7 @@ serverSettings AppConfig{..} =
 postgrest :: LogLevel -> AppState.AppState -> IO () -> Wai.Application
 postgrest logLev appState connWorker =
   Middleware.pgrstMiddleware logLev $
-    \req respond -> do
+    \waiRequest waiRespond -> do
       time <- AppState.getTime appState
       conf <- AppState.getConfig appState
       maybeDbStructure <- AppState.getDbStructure appState
@@ -96,7 +96,7 @@ postgrest logLev appState connWorker =
       let
         eitherResponse :: IO (Either Error Wai.Response)
         eitherResponse =
-          runExceptT $ postgrestResponse conf maybeDbStructure pgVer (AppState.getPool appState) time req
+          runExceptT $ postgrestResponse conf pgVer maybeDbStructure (AppState.getPool appState) time waiRequest
 
       response <- either Error.errorResponseFor identity <$> eitherResponse
 
@@ -105,23 +105,23 @@ postgrest logLev appState connWorker =
       -- the connWorker is done.
       when (Wai.responseStatus response == HTTP.status503) connWorker
 
-      respond response
+      waiRespond response
 
 postgrestResponse
   :: AppConfig
-  -> Maybe DbStructure
   -> PgVersion
+  -> Maybe DbStructure
   -> SQL.Pool
   -> UTCTime
   -> Wai.Request
   -> Handler IO Wai.Response
-postgrestResponse conf maybeDbStructure pgVer pool time req = do
+postgrestResponse conf pgVer maybeDbStructure pool time waiRequest = do
   -- Fail early if no DbStructure is loaded
   dbStructure <- maybe (throwError Error.ConnectionLostError) pure maybeDbStructure
   -- The JWT must be checked before touching the db
-  jwtClaims <- Auth.jwtClaims conf req time
-  body <- lift $ Wai.strictRequestBody req
-  request <- liftEither $ Request.parse conf pgVer dbStructure req body
+  jwtClaims <- Auth.jwtClaims conf waiRequest time
+  waiBody <- lift $ Wai.strictRequestBody waiRequest
+  request <- liftEither $ Request.parse conf pgVer dbStructure waiRequest waiBody
   runDbHandler pool (Query.txMode $ Request.apiReq request) jwtClaims .
     Middleware.optionalRollback conf (Request.apiReq request) $ do
       Middleware.setPgLocals conf jwtClaims (Request.apiReq request)

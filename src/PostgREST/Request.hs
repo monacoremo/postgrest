@@ -40,9 +40,9 @@ import Protolude
 
 -- TODO: Carve out and use RequestError as Error type
 parse :: AppConfig -> PgVersion -> DbStructure -> Wai.Request -> LBS.ByteString -> Either Error Request
-parse conf pgVer dbStructure req body = do
+parse conf pgVer dbStructure waiRequest waiBody = do
   apiRequest@ApiRequest{..} <-
-    mapLeft Error.ApiRequestError $ ApiRequest.userApiRequest conf dbStructure req body
+    mapLeft Error.ApiRequestError $ ApiRequest.userApiRequest conf dbStructure waiRequest waiBody
 
   case (iAction, iTarget) of
     (ActionRead headersOnly, TargetIdent identifier) -> do

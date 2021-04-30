@@ -43,7 +43,7 @@ type JWTClaims = M.HashMap Text JSON.Value
 -- map of JWT claims.
 jwtClaims :: Monad m =>
   AppConfig -> Wai.Request -> UTCTime -> ExceptT Error m JWTClaims
-jwtClaims AppConfig{..} request time =
+jwtClaims AppConfig{..} waiRequest time =
   if payload == "" then
     return M.empty
   else do
@@ -53,7 +53,7 @@ jwtClaims AppConfig{..} request time =
         JWT.verifyClaimsAt validation secret time =<< JWT.decodeCompact payload
     liftEither . mapLeft jwtClaimsError $ claimsMap configJwtRoleClaimKey <$> eitherClaims
   where
-    payload = toS $ headerJWT request
+    payload = toS $ headerJWT waiRequest
     validation =
       JWT.defaultJWTValidationSettings audienceCheck & set JWT.allowedSkew 1
 
@@ -65,13 +65,13 @@ jwtClaims AppConfig{..} request time =
     jwtClaimsError e              = JwtTokenInvalid $ show e
 
 headerJWT :: Wai.Request -> Text
-headerJWT req =
+headerJWT waiRequest =
   case T.split (== ' ') (toS auth) of
     ("Bearer" : t : _) -> t
     ("bearer" : t : _) -> t
     _                  -> ""
   where
-    auth = fromMaybe "" . lookup hAuthorization $ Wai.requestHeaders req
+    auth = fromMaybe "" . lookup hAuthorization $ Wai.requestHeaders waiRequest
 
 -- | Turn JWT ClaimSet into something easier to work with.
 --
