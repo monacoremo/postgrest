@@ -22,6 +22,7 @@ import qualified Data.Aeson          as JSON
 import qualified Data.HashMap.Strict as M
 import qualified Data.Text           as T
 import qualified Data.Vector         as V
+import qualified Network.Wai         as Wai
 
 import Control.Lens              (set)
 import Control.Monad.Except      (liftEither)
@@ -29,7 +30,6 @@ import Data.Either.Combinators   (mapLeft)
 import Data.List                 (lookup)
 import Data.Time.Clock           (UTCTime)
 import Network.HTTP.Types.Header (hAuthorization)
-import Network.Wai               (Request (..))
 
 import PostgREST.Config (AppConfig (..), JSPath, JSPathExp (..))
 import PostgREST.Error  (Error (..))
@@ -42,7 +42,7 @@ type JWTClaims = M.HashMap Text JSON.Value
 -- | Receives the JWT secret and audience (from config) and a JWT and returns a
 -- map of JWT claims.
 jwtClaims :: Monad m =>
-  AppConfig -> Request -> UTCTime -> ExceptT Error m JWTClaims
+  AppConfig -> Wai.Request -> UTCTime -> ExceptT Error m JWTClaims
 jwtClaims AppConfig{..} request time =
   if payload == "" then
     return M.empty
@@ -64,14 +64,14 @@ jwtClaims AppConfig{..} request time =
     jwtClaimsError JWT.JWTExpired = JwtTokenInvalid "JWT expired"
     jwtClaimsError e              = JwtTokenInvalid $ show e
 
-headerJWT :: Request -> Text
+headerJWT :: Wai.Request -> Text
 headerJWT req =
   case T.split (== ' ') (toS auth) of
     ("Bearer" : t : _) -> t
     ("bearer" : t : _) -> t
     _                  -> ""
   where
-    auth = fromMaybe "" . lookup hAuthorization $ requestHeaders req
+    auth = fromMaybe "" . lookup hAuthorization $ Wai.requestHeaders req
 
 -- | Turn JWT ClaimSet into something easier to work with.
 --
