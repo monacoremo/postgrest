@@ -33,9 +33,9 @@ import PostgREST.GucHeader               (GucHeader,
                                           addHeadersIfNotIncluded,
                                           unwrapGucHeader)
 import PostgREST.Query                   (InvokeQueryResult (..),
+                                          MutateQueryResult (..),
                                           OpenApiQueryResult,
-                                          ReadQueryResult (..),
-                                          WriteQueryResult (..))
+                                          ReadQueryResult (..))
 import PostgREST.Request                 (InvokeRequestInfo (..),
                                           MutateRequestInfo (..),
                                           ReadRequestInfo (..))
@@ -67,8 +67,8 @@ readResponse ReadQueryResult{..} =
       ]
       ++ contentTypeHeaders rrApiRequest
 
-createResponse :: WriteQueryResult -> Wai.Response
-createResponse WriteQueryResult{..} =
+createResponse :: MutateQueryResult -> Wai.Response
+createResponse MutateQueryResult{..} =
   if iPreferRepresentation == Full then
     response (headers ++ contentTypeHeaders mrApiRequest) (toS resBody)
   else
@@ -98,8 +98,8 @@ createResponse WriteQueryResult{..} =
             (\x -> ("Preference-Applied", BS8.pack $ show x)) <$> iPreferResolution
         ]
 
-updateResponse :: WriteQueryResult -> Wai.Response
-updateResponse WriteQueryResult{..} =
+updateResponse :: MutateQueryResult -> Wai.Response
+updateResponse MutateQueryResult{..} =
   if fullRepr then
     response (contentTypeHeaders mrApiRequest ++ [contentRangeHeader]) (toS resBody)
   else
@@ -117,8 +117,8 @@ updateResponse WriteQueryResult{..} =
       RangeQuery.contentRangeH 0 (resQueryTotal - 1) $
         if shouldCount (iPreferCount mrApiRequest) then Just resQueryTotal else Nothing
 
-singleUpsertResponse :: WriteQueryResult -> Wai.Response
-singleUpsertResponse WriteQueryResult{..} =
+singleUpsertResponse :: MutateQueryResult -> Wai.Response
+singleUpsertResponse MutateQueryResult{..} =
   if iPreferRepresentation mrApiRequest == Full then
     response HTTP.status200 (contentTypeHeaders mrApiRequest) (toS resBody)
   else
@@ -127,8 +127,8 @@ singleUpsertResponse WriteQueryResult{..} =
     MutateRequestInfo{..} = resRequest
     response = gucResponse resGucStatus resGucHeaders
 
-deleteResponse :: WriteQueryResult -> Wai.Response
-deleteResponse WriteQueryResult{..} =
+deleteResponse :: MutateQueryResult -> Wai.Response
+deleteResponse MutateQueryResult{..} =
   if iPreferRepresentation mrApiRequest == Full then
     response HTTP.status200
       (contentTypeHeaders mrApiRequest ++ [contentRangeHeader])

@@ -10,7 +10,7 @@ module PostgREST.Query
   , updateQuery
   , DbHandler
   , ReadQueryResult(..)
-  , WriteQueryResult(..)
+  , MutateQueryResult(..)
   , InvokeQueryResult(..)
   , OpenApiQueryResult
   ) where
@@ -52,6 +52,7 @@ import PostgREST.Request.Preferences     (PreferCount (..),
 
 import Protolude hiding (Handler)
 
+
 type DbHandler = ExceptT Error SQL.Transaction
 
 data ReadQueryResult = ReadQueryResult
@@ -62,6 +63,27 @@ data ReadQueryResult = ReadQueryResult
   , rqGucHeaders :: [GucHeader]
   , rqGucStatus  :: Maybe HTTP.Status
   }
+
+data MutateQueryResult = MutateQueryResult
+  { resRequest    :: MutateRequestInfo
+  , resQueryTotal :: Int64
+  , resFields     :: [ByteString]
+  , resBody       :: ByteString
+  , resGucStatus  :: Maybe HTTP.Status
+  , resGucHeaders :: [GucHeader]
+  }
+
+data InvokeQueryResult = InvokeQueryResult
+  { iqRequest    :: InvokeRequestInfo
+  , iqTableTotal :: Maybe Int64
+  , iqQueryTotal :: Int64
+  , iqBody       :: BS8.ByteString
+  , iqGucHeaders :: [GucHeader]
+  , iqGucStatus  :: Maybe HTTP.Status
+  }
+
+type OpenApiQueryResult = ([Table], Maybe Text, Proc.ProcsMap)
+
 
 readQuery :: ReadRequestInfo -> DbHandler ReadQueryResult
 readQuery reqInfo@ReadRequestInfo{..} = do
@@ -105,24 +127,24 @@ readQuery reqInfo@ReadRequestInfo{..} = do
           lift . SQL.statement mempty $
             Statements.createExplainStatement countQry configDbPreparedStatements
 
-createQuery :: MutateRequestInfo -> DbHandler WriteQueryResult
+createQuery :: MutateRequestInfo -> DbHandler MutateQueryResult
 createQuery mutReq@MutateRequestInfo{..} = do
-  result <- writeQuery True pkCols mutReq
+  result <- mutateQuery True pkCols mutReq
   failNotSingular (iAcceptContentType mrApiRequest) (resQueryTotal result)
   return result
   where
     pkCols = tablePKCols mrDbStructure qiSchema qiName
     QualifiedIdentifier{..} = mrIdentifier
 
-updateQuery :: MutateRequestInfo -> DbHandler WriteQueryResult
+updateQuery :: MutateRequestInfo -> DbHandler MutateQueryResult
 updateQuery mutReq@MutateRequestInfo{..} = do
-  result <- writeQuery False mempty mutReq
+  result <- mutateQuery False mempty mutReq
   failNotSingular (iAcceptContentType mrApiRequest) (resQueryTotal result)
   return result
 
-singleUpsertQuery :: MutateRequestInfo -> DbHandler WriteQueryResult
+singleUpsertQuery :: MutateRequestInfo -> DbHandler MutateQueryResult
 singleUpsertQuery mutReq = do
-  result <- writeQuery False mempty mutReq
+  result <- mutateQuery False mempty mutReq
 
   -- Makes sure the querystring pk matches the payload pk
   -- e.g. PUT /items?id=eq.1 { "id" : 1, .. } is accepted,
@@ -135,20 +157,28 @@ singleUpsertQuery mutReq = do
 
   return result
 
-deleteQuery :: MutateRequestInfo -> DbHandler WriteQueryResult
+deleteQuery :: MutateRequestInfo -> DbHandler MutateQueryResult
 deleteQuery mutReq@MutateRequestInfo{..} = do
-  result <- writeQuery False mempty mutReq
+  result <- mutateQuery False mempty mutReq
   failNotSingular (iAcceptContentType mrApiRequest) (resQueryTotal result)
   return result
 
-data InvokeQueryResult = InvokeQueryResult
-  { iqRequest    :: InvokeRequestInfo
-  , iqTableTotal :: Maybe Int64
-  , iqQueryTotal :: Int64
-  , iqBody       :: BS8.ByteString
-  , iqGucHeaders :: [GucHeader]
-  , iqGucStatus  :: Maybe HTTP.Status
-  }
+mutateQuery :: Bool -> [Text] -> MutateRequestInfo -> DbHandler MutateQueryResult
+mutateQuery isInsert pkCols mr@MutateRequestInfo{..} = do
+  (_, queryTotal, fields, body, gucHeaders, gucStatus) <-
+    lift . SQL.statement mempty $
+      Statements.createWriteStatement
+        (QueryBuilder.readRequestToQuery mrReadRequest)
+        (QueryBuilder.mutateRequestToQuery mrMutateRequest)
+        (iAcceptContentType mrApiRequest == CTSingularJSON)
+        isInsert
+        (iAcceptContentType mrApiRequest == CTTextCSV)
+        (iPreferRepresentation mrApiRequest)
+        pkCols
+        mrPgVersion
+        (configDbPreparedStatements mrConfig)
+
+  liftEither $ MutateQueryResult mr queryTotal fields body <$> gucStatus <*> gucHeaders
 
 invokeQuery :: InvokeRequestInfo -> DbHandler InvokeQueryResult
 invokeQuery ir@InvokeRequestInfo{..} = do
@@ -181,8 +211,6 @@ invokeQuery ir@InvokeRequestInfo{..} = do
     returnsSingle (ApiRequest.TargetProc target _) = Proc.procReturnsSingle target
     returnsSingle _                                = False
 
-type OpenApiQueryResult = ([Table], Maybe Text, Proc.ProcsMap)
-
 openApiQuery :: Schema -> AppConfig -> DbHandler OpenApiQueryResult
 openApiQuery tSchema AppConfig{..} = do
   lift $ (,,)
@@ -209,33 +237,6 @@ txMode ApiRequest{..} =
       SQL.Read
     _ ->
       SQL.Write
-
--- | Result from executing a write query on the database
-data WriteQueryResult = WriteQueryResult
-  { resRequest    :: MutateRequestInfo
-  , resQueryTotal :: Int64
-  , resFields     :: [ByteString]
-  , resBody       :: ByteString
-  , resGucStatus  :: Maybe HTTP.Status
-  , resGucHeaders :: [GucHeader]
-  }
-
-writeQuery :: Bool -> [Text] -> MutateRequestInfo -> DbHandler WriteQueryResult
-writeQuery isInsert pkCols mr@MutateRequestInfo{..} = do
-  (_, queryTotal, fields, body, gucHeaders, gucStatus) <-
-    lift . SQL.statement mempty $
-      Statements.createWriteStatement
-        (QueryBuilder.readRequestToQuery mrReadRequest)
-        (QueryBuilder.mutateRequestToQuery mrMutateRequest)
-        (iAcceptContentType mrApiRequest == CTSingularJSON)
-        isInsert
-        (iAcceptContentType mrApiRequest == CTTextCSV)
-        (iPreferRepresentation mrApiRequest)
-        pkCols
-        mrPgVersion
-      (configDbPreparedStatements mrConfig)
-
-  liftEither $ WriteQueryResult mr queryTotal fields body <$> gucStatus <*> gucHeaders
 
 -- | Fail a response if a single JSON object was requested and not exactly one
 -- was found.

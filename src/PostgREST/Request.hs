@@ -38,40 +38,6 @@ import PostgREST.Request.ApiRequest      (Action (..),
 
 import Protolude
 
--- TODO: Carve out and use RequestError as Error type
-parse :: AppConfig -> PgVersion -> DbStructure -> Wai.Request -> LBS.ByteString -> Either Error Request
-parse conf pgVer dbStructure waiRequest waiBody = do
-  apiRequest@ApiRequest{..} <-
-    mapLeft Error.ApiRequestError $ ApiRequest.userApiRequest conf dbStructure waiRequest waiBody
-
-  case (iAction, iTarget) of
-    (ActionRead headersOnly, TargetIdent identifier) -> do
-      readReq <- readRequest identifier conf dbStructure apiRequest
-      bField <- binaryField conf iTarget iAcceptContentType readReq
-      return . ReadRequest $ ReadRequestInfo conf pgVer dbStructure apiRequest headersOnly identifier readReq bField
-    (ActionCreate, TargetIdent identifier) ->
-      CreateRequest <$> mutateRequest conf pgVer dbStructure apiRequest identifier
-    (ActionUpdate, TargetIdent identifier) ->
-      UpdateRequest <$> mutateRequest conf pgVer dbStructure apiRequest identifier
-    (ActionSingleUpsert, TargetIdent identifier) ->
-      SingleUpsertRequest <$> mutateRequest conf pgVer dbStructure apiRequest identifier
-    (ActionDelete, TargetIdent identifier) ->
-      DeleteRequest <$> mutateRequest conf pgVer dbStructure apiRequest identifier
-    (ActionInfo, TargetIdent identifier) ->
-      return $ InfoRequest dbStructure apiRequest identifier
-    (ActionInvoke invMethod, TargetProc proc _) -> do
-      readReq <- readRequest identifier conf dbStructure apiRequest
-      bField <- binaryField conf iTarget iAcceptContentType readReq
-      return . InvokeRequest $
-        InvokeRequestInfo conf pgVer dbStructure apiRequest invMethod proc readReq bField
-      where
-        identifier =
-          QualifiedIdentifier (pdSchema proc)
-            (fromMaybe (pdName proc) $ Proc.procTableName proc)
-    (ActionInspect headersOnly, TargetDefaultSpec tSchema) -> do
-      Right $ OpenApiRequest conf dbStructure apiRequest headersOnly tSchema
-    _ ->
-      Left Error.NotFound
 
 data Request
   = ReadRequest ReadRequestInfo
@@ -115,6 +81,42 @@ data InvokeRequestInfo = InvokeRequestInfo
   , irBinaryField  :: BinaryField
   }
 
+type BinaryField = Maybe FieldName
+
+parse :: AppConfig -> PgVersion -> DbStructure -> Wai.Request -> LBS.ByteString -> Either Error Request
+parse conf pgVer dbStructure waiRequest waiBody = do
+  apiRequest@ApiRequest{..} <-
+    mapLeft Error.ApiRequestError $ ApiRequest.userApiRequest conf dbStructure waiRequest waiBody
+
+  case (iAction, iTarget) of
+    (ActionRead headersOnly, TargetIdent identifier) -> do
+      readReq <- readRequest identifier conf dbStructure apiRequest
+      bField <- binaryField conf iTarget iAcceptContentType readReq
+      return . ReadRequest $ ReadRequestInfo conf pgVer dbStructure apiRequest headersOnly identifier readReq bField
+    (ActionCreate, TargetIdent identifier) ->
+      CreateRequest <$> mutateRequest conf pgVer dbStructure apiRequest identifier
+    (ActionUpdate, TargetIdent identifier) ->
+      UpdateRequest <$> mutateRequest conf pgVer dbStructure apiRequest identifier
+    (ActionSingleUpsert, TargetIdent identifier) ->
+      SingleUpsertRequest <$> mutateRequest conf pgVer dbStructure apiRequest identifier
+    (ActionDelete, TargetIdent identifier) ->
+      DeleteRequest <$> mutateRequest conf pgVer dbStructure apiRequest identifier
+    (ActionInfo, TargetIdent identifier) ->
+      return $ InfoRequest dbStructure apiRequest identifier
+    (ActionInvoke invMethod, TargetProc proc _) -> do
+      readReq <- readRequest identifier conf dbStructure apiRequest
+      bField <- binaryField conf iTarget iAcceptContentType readReq
+      return . InvokeRequest $
+        InvokeRequestInfo conf pgVer dbStructure apiRequest invMethod proc readReq bField
+      where
+        identifier =
+          QualifiedIdentifier (pdSchema proc)
+            (fromMaybe (pdName proc) $ Proc.procTableName proc)
+    (ActionInspect headersOnly, TargetDefaultSpec tSchema) -> do
+      Right $ OpenApiRequest conf dbStructure apiRequest headersOnly tSchema
+    _ ->
+      Left Error.NotFound
+
 -- | Get the raw ApiRequest from a request. This should be obsoloted by further
 -- refactoring of this module.
 apiReq :: Request -> ApiRequest
@@ -139,8 +141,6 @@ mutateRequest conf pgVer dbStructure apiRequest identifier@QualifiedIdentifier{.
 readRequest :: QualifiedIdentifier -> AppConfig -> DbStructure -> ApiRequest -> Either Error Types.ReadRequest
 readRequest QualifiedIdentifier{..} AppConfig{..} dbStructure =
   ReqBuilder.readRequest qiSchema qiName configDbMaxRows (dbRelationships dbStructure)
-
-type BinaryField = Maybe FieldName
 
 -- | If raw(binary) output is requested, check that ContentType is one of the
 -- admitted rawContentTypes and that`?select=...` contains only one field other
